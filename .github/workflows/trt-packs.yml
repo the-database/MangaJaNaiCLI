@@ -1,0 +1,64 @@
+name: trt-packs
+
+# The TensorRT runtime packs `mangajanai setup` installs (scripts/trt_packs.py): NVIDIA's TensorRT
+# split into trt-runtime plus one builder-resource pack per GPU generation, for Windows and Linux,
+# with packs-<platform>.json (sha256, sizes, file lists). Published on their own tag,
+# trt-<TensorRT version>, so CLI releases never re-upload them; run this only when the TensorRT
+# version in scripts/trt_packs.py changes. The CLI pins the tag and each index's SHA-256.
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: Build packs
+        run: python scripts/trt_packs.py --platform windows --out packs --work ${{ runner.temp }}/trt-work --sevenzip "C:\Program Files\7-Zip\7z.exe"
+      - uses: actions/upload-artifact@v6
+        with:
+          name: trt-packs-windows
+          path: packs/*
+
+  linux:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install 7-Zip
+        run: sudo apt-get update && sudo apt-get install -y p7zip-full
+      - name: Build packs
+        run: python3 scripts/trt_packs.py --platform linux --out packs --work ${{ runner.temp }}/trt-work
+      - uses: actions/upload-artifact@v6
+        with:
+          name: trt-packs-linux
+          path: packs/*
+
+  publish:
+    needs: [windows, linux]
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v6
+        with:
+          path: packs
+          merge-multiple: true
+      - name: Publish the trt-<version> release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ver=$(python3 scripts/trt_packs.py --print-version)
+          tag="trt-$ver"
+          ls -la packs
+          sha256sum packs/packs-*.json
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" packs/* --clobber
+          else
+            gh release create "$tag" packs/* --title "TensorRT $ver runtime packs" --latest=false \
+              --notes "NVIDIA TensorRT $ver runtime (CUDA 13.4) for \`mangajanai setup\`, split into trt-runtime plus one builder-resource pack per GPU generation (trt-sm75 … trt-sm120, trt-ptx as the fallback), for Windows and Linux. packs-<platform>.json lists each pack's SHA-256, size and files. NVIDIA proprietary software, redistributed under the TensorRT license; NVIDIA's notices ship in trt-runtime."
+          fi

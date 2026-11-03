@@ -1,4 +1,4 @@
-//! The program: `mangajanaitrt` (the command line) and `mangajanai_upscale` (the same program under
+//! The program: `mangajanai` (the command line) and `mangajanai_upscale` (the same program under
 //! the name MangaJaNai GUI runs). `--settings`, `--list-devices` and `--model-info` are the GUI's
 //! interface and behave exactly as they always have; everything else is the command line.
 
@@ -10,7 +10,7 @@ use crate::settings::{self, Chain, Format, Target, Workflow};
 use crate::upscaler::{self, BackendChoice, Upscaler};
 use crate::{process, progress, run};
 
-const CONFIG_NAME: &str = "mangajanaitrt.ini";
+const CONFIG_NAME: &str = "mangajanai.ini";
 
 fn help(prog: &str) -> String {
     format!(
@@ -103,7 +103,7 @@ fn prog_name() -> String {
     std::env::args_os()
         .next()
         .and_then(|a| Path::new(&a).file_stem().map(|s| s.to_string_lossy().into_owned()))
-        .unwrap_or_else(|| "mangajanaitrt".into())
+        .unwrap_or_else(|| "mangajanai".into())
 }
 
 /// Everything the flags can say; `None` = not given.

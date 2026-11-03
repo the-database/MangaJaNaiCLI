@@ -1,4 +1,4 @@
-//! The command line's saved settings: `mangajanaitrt.ini`. Every setting is optional and mirrors a
+//! The command line's saved settings: `mangajanai.ini`. Every setting is optional and mirrors a
 //! flag; flags override the file, and the file overrides an imported GUI workflow (`workflow =`).
 //!
 //! The format is plain INI, made forgiving for people editing it in Notepad: values are taken as
@@ -12,10 +12,10 @@ use std::path::{Path, PathBuf};
 
 use crate::settings::{Chain, Format, Target};
 
-/// The file `mangajanaitrt init` writes, and the reference for every setting.
-pub const TEMPLATE: &str = r#"; mangajanaitrt settings
+/// The file `mangajanai init` writes, and the reference for every setting.
+pub const TEMPLATE: &str = r#"; mangajanai settings
 ;
-; Run `mangajanaitrt` with no arguments to use this file. It is found in the current folder, else
+; Run `mangajanai` with no arguments to use this file. It is found in the current folder, else
 ; next to the program; -c <file> picks another. Anything given on the command line overrides it.
 ; Every setting is optional: delete a line, or leave it empty, to use the default.
 ; Relative paths are relative to this file's folder. Lines starting with ; are comments.
@@ -74,7 +74,7 @@ fit =
 [gpu]
 ; auto, tensorrt, directml or tensorrt-rtx (directml and tensorrt-rtx: Windows only)
 backend = auto
-; first, all, or GPU numbers from `mangajanaitrt devices`, like 0,1
+; first, all, or GPU numbers from `mangajanai devices`, like 0,1
 devices = first
 ; Inference threads per GPU. 2 keeps the GPU busier (about 20-45% faster) but needs about twice the VRAM.
 streams = 1

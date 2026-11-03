@@ -18,7 +18,7 @@ permissions:
 
 env:
   # The libaji release the Linux bundle carries (its aji-linux-x64.tar.zst).
-  AJI_VERSION: v0.20.0
+  AJI_VERSION: v0.21.0
 
 jobs:
   build:

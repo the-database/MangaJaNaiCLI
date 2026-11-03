@@ -160,6 +160,8 @@ pub enum Target {
     Height(u32),
     /// Fit within a display (width, height), orientation already applied by the GUI.
     Fit(u32, u32),
+    /// Whatever the model gives: no final resize (the command line's default with one model).
+    Native,
 }
 
 impl Workflow {

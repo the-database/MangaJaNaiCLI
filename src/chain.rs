@@ -4,13 +4,15 @@
 use crate::settings::{Chain, Target};
 
 /// The scale the image must reach, from its original size. In fit-to-display mode it's the scale
-/// that fits both dimensions (1.x used the height ratio alone to pick the chain).
+/// that fits both dimensions (1.x used the height ratio alone to pick the chain). `Native` has no
+/// required scale: 0, which only chains without a minimum scale accept.
 pub fn required_scale(target: Target, (ow, oh): (u32, u32)) -> f64 {
     match target {
         Target::Scale(s) => s,
         Target::Width(tw) => tw as f64 / ow as f64,
         Target::Height(th) => th as f64 / oh as f64,
         Target::Fit(tw, th) => (th as f64 / oh as f64).min(tw as f64 / ow as f64),
+        Target::Native => 0.0,
     }
 }
 
@@ -78,6 +80,7 @@ pub fn pre_resize(chain: &Chain, (w, h): (u32, u32)) -> Option<(u32, u32)> {
 pub fn final_size(target: Target, orig: (u32, u32), (w, h): (u32, u32)) -> Option<(u32, u32)> {
     let (ow, oh) = (orig.0 as f64, orig.1 as f64);
     let target = match target {
+        Target::Native => return None,
         Target::Fit(tw, th) => {
             if th as f64 / oh < tw as f64 / ow {
                 Target::Height(th)
@@ -94,7 +97,7 @@ pub fn final_size(target: Target, orig: (u32, u32), (w, h): (u32, u32)) -> Optio
             let nh = round(oh * s);
             (round(w as f64 * nh as f64 / h as f64), nh)
         }
-        Target::Fit(..) => unreachable!(),
+        Target::Fit(..) | Target::Native => unreachable!(),
     };
     let unchanged = match target {
         Target::Width(tw) => w == tw,

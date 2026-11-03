@@ -3,6 +3,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::time::Duration;
 
 use yosh_image::aji::{Aji, Backend, Context, ContextParams, Device, LoadParams, Model, ModelState, Pixels, PixelsMut, Upscaled};
@@ -22,10 +23,12 @@ pub enum BackendChoice {
 }
 
 impl BackendChoice {
-    /// The backends `Upscaler::open` tries, in order.
-    fn candidates(self) -> &'static [Backend] {
+    /// The backends `Upscaler::open` tries, in order. Off Windows there is only TensorRT, so Auto
+    /// reports TensorRT's own error there instead of a DirectML one.
+    pub fn candidates(self) -> &'static [Backend] {
         match self {
-            BackendChoice::Auto => &[Backend::TensorRt, Backend::DirectMl],
+            BackendChoice::Auto if cfg!(windows) => &[Backend::TensorRt, Backend::DirectMl],
+            BackendChoice::Auto => &[Backend::TensorRt],
             BackendChoice::TensorRt => &[Backend::TensorRt],
             BackendChoice::DirectMl => &[Backend::DirectMl],
             BackendChoice::TensorRtRtx => &[Backend::TensorRtRtx, Backend::TensorRt],
@@ -33,13 +36,17 @@ impl BackendChoice {
     }
 
     pub fn parse(s: &str) -> Result<Self, String> {
-        match s.to_ascii_lowercase().as_str() {
-            "auto" => Ok(Self::Auto),
-            "trt" | "tensorrt" => Ok(Self::TensorRt),
-            "dml" | "directml" => Ok(Self::DirectMl),
-            "tensorrt-rtx" | "trt-rtx" | "trtrtx" => Ok(Self::TensorRtRtx),
-            _ => Err(format!("unknown backend '{s}' (auto, tensorrt, directml, tensorrt-rtx)")),
+        let choice = match s.to_ascii_lowercase().as_str() {
+            "auto" => Self::Auto,
+            "trt" | "tensorrt" => Self::TensorRt,
+            "dml" | "directml" => Self::DirectMl,
+            "tensorrt-rtx" | "trt-rtx" | "trtrtx" => Self::TensorRtRtx,
+            _ => return Err(format!("unknown backend '{s}' (auto, tensorrt, directml, tensorrt-rtx)")),
+        };
+        if !cfg!(windows) && matches!(choice, Self::DirectMl | Self::TensorRtRtx) {
+            return Err(format!("the {s} backend is Windows only; use tensorrt (or auto)"));
         }
+        Ok(choice)
     }
 }
 
@@ -68,8 +75,15 @@ pub struct Upscaler {
     fallback: Option<Fallback>,
     model_dirs: Vec<PathBuf>,
     models: HashMap<(PathBuf, u32), Model>,
+    /// Input-pixel tile overlap; `None` = libaji's default (32).
+    overlap: Option<u32>,
     pub description: String,
 }
+
+/// Held while a model loads, so inference threads on several GPUs never build the same engine (same
+/// model, tile and GPU kind share one cache file) at once: the second waits, then loads the engine
+/// the first one built. Uncontended with one GPU.
+static LOAD_LOCK: Mutex<()> = Mutex::new(());
 
 impl Upscaler {
     /// Open the backend: the requested one, or for Auto the first that has a usable device. A
@@ -80,8 +94,10 @@ impl Upscaler {
         device_id: u64,
         cache_dir: Option<PathBuf>,
         model_dirs: Vec<PathBuf>,
+        overlap: Option<u32>,
     ) -> Result<Self, String> {
         let aji = Aji::load(aji_dir)?;
+        let trtexec_env = trtexec(aji_dir);
         let mut err = String::from("no compatible GPU found");
         for &backend in choice.candidates() {
             if choice == BackendChoice::TensorRtRtx && backend == Backend::TensorRt {
@@ -96,13 +112,14 @@ impl Upscaler {
                 }
             };
             let device = devices.iter().find(|d| d.id == device_id).unwrap_or(&devices[0]);
-            match open_context(&aji, backend, device.id, &cache_dir) {
+            match open_context(&aji, backend, device.id, &cache_dir, &trtexec_env) {
                 Ok(ctx) => {
                     let description = format!("{} on {}", backend_name(backend), device.name);
                     let fallback = (backend == Backend::TensorRtRtx).then(|| Fallback {
                         aji: aji.clone(),
                         device_id: device.id,
                         cache_dir: cache_dir.clone(),
+                        trtexec_env: trtexec_env.clone(),
                         ctx: None,
                     });
                     return Ok(Self {
@@ -113,6 +130,7 @@ impl Upscaler {
                         fallback,
                         model_dirs,
                         models: HashMap::new(),
+                        overlap,
                         description,
                     });
                 }
@@ -143,7 +161,8 @@ impl Upscaler {
                     progress::hint(&name, &h);
                 }
             }
-            let model = match load_model(&self.ctx, self.backend, path, tile, &name) {
+            let _loading = LOAD_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+            let model = match load_model(&self.ctx, self.backend, path, tile, self.overlap, &name) {
                 Ok(m) => m,
                 Err(e) => {
                     let Some(fb) = self.fallback.as_mut() else {
@@ -151,7 +170,7 @@ impl Upscaler {
                     };
                     progress::backend_fallback(Some(&name), &e);
                     let ctx = fb.context()?;
-                    load_model(&ctx, Backend::TensorRt, path, tile, &name).map_err(|e| format!("{name}: {e}"))?
+                    load_model(&ctx, Backend::TensorRt, path, tile, self.overlap, &name).map_err(|e| format!("{name}: {e}"))?
                 }
             };
             self.models.insert(key.clone(), model);
@@ -176,35 +195,102 @@ impl Upscaler {
         }
     }
 
-    /// Upscale an image with alpha (`channels` 2 = gray + alpha, 4 = RGBA, straight alpha): the
-    /// color is composited once onto black and once onto white, both are upscaled, and alpha is
-    /// recovered from how far apart they come out (1 − (white − black)); the color is the black
-    /// pass un-premultiplied. The 1.x approach, which models trained without alpha handle well.
+    /// Upscale an image with alpha (`channels` 2 = gray + alpha, 4 = RGBA, straight alpha).
+    ///
+    /// Uniform alpha (every pixel equally transparent) skips the trick below: the color is upscaled
+    /// once and the alpha rebuilt at the output size. Otherwise the color is composited once onto
+    /// black and once onto white, both are upscaled, and alpha is recovered per channel from how far
+    /// apart they come out (1 − (white − black)); on color the channels' estimates are blended toward
+    /// their extremes (`max·mean + min·(1 − mean)`, chaiNNer's denoise, which suppresses model noise
+    /// in semi-transparent areas). The color is the black pass un-premultiplied.
     pub fn upscale_with_alpha(&mut self, path: &Path, tile: u32, w: u32, h: u32, channels: u8, pixels: &[u8]) -> Result<(Vec<u8>, u32), String> {
         let cc = (channels - 1) as usize;
         let n = channels as usize;
-        let mut on_black = Vec::with_capacity(pixels.len() / n * cc);
-        let mut on_white = Vec::with_capacity(on_black.capacity());
-        for px in pixels.chunks_exact(n) {
-            let a = px[cc] as u32;
-            for &v in &px[..cc] {
-                on_black.push(((v as u32 * a + 127) / 255) as u8);
-                on_white.push(((v as u32 * a + 255 * (255 - a) + 127) / 255) as u8);
-            }
+        if let Some(a) = uniform_alpha(pixels, n) {
+            let color: Vec<u8> = pixels.chunks_exact(n).flat_map(|px| px[..cc].iter().copied()).collect();
+            let (up, scale) = self.upscale(path, tile, w, h, cc as u8, &color)?;
+            let out = up.chunks_exact(cc).flat_map(|px| px.iter().copied().chain([a])).collect();
+            return Ok((out, scale));
         }
+        let (on_black, on_white) = on_black_and_white(pixels, n);
         let (black, scale) = self.upscale(path, tile, w, h, cc as u8, &on_black)?;
         let (white, _) = self.upscale(path, tile, w, h, cc as u8, &on_white)?;
-        let mut out = Vec::with_capacity(black.len() / cc * n);
-        for (b, wh) in black.chunks_exact(cc).zip(white.chunks_exact(cc)) {
-            let diff: i32 = b.iter().zip(wh).map(|(&b, &w)| w as i32 - b as i32).sum::<i32>() / cc as i32;
-            let a = (255 - diff).clamp(0, 255) as u32;
-            for &v in b {
-                out.push((v as u32 * 255 + a / 2).checked_div(a).map_or(0, |c| c.min(255) as u8));
-            }
-            out.push(a as u8);
-        }
-        Ok((out, scale))
+        Ok((recover_alpha(&black, &white, cc), scale))
     }
+}
+
+/// The alpha value every pixel has, if they all have the same one (`n` channels, alpha last).
+fn uniform_alpha(pixels: &[u8], n: usize) -> Option<u8> {
+    let mut it = pixels.chunks_exact(n).map(|px| px[n - 1]);
+    let first = it.next()?;
+    it.all(|a| a == first).then_some(first)
+}
+
+/// The color channels of straight-alpha `pixels` (`n` channels, alpha last) composited onto black
+/// and onto white.
+fn on_black_and_white(pixels: &[u8], n: usize) -> (Vec<u8>, Vec<u8>) {
+    let cc = n - 1;
+    let mut on_black = Vec::with_capacity(pixels.len() / n * cc);
+    let mut on_white = Vec::with_capacity(on_black.capacity());
+    for px in pixels.chunks_exact(n) {
+        let a = px[cc] as u32;
+        for &v in &px[..cc] {
+            on_black.push(((v as u32 * a + 127) / 255) as u8);
+            on_white.push(((v as u32 * a + 255 * (255 - a) + 127) / 255) as u8);
+        }
+    }
+    (on_black, on_white)
+}
+
+/// Straight-alpha pixels (`cc` color channels + alpha) from the upscaled black and white passes.
+fn recover_alpha(black: &[u8], white: &[u8], cc: usize) -> Vec<u8> {
+    let mut out = Vec::with_capacity(black.len() / cc * (cc + 1));
+    for (b, wh) in black.chunks_exact(cc).zip(white.chunks_exact(cc)) {
+        let est = |i: usize| (255 - (wh[i] as i32 - b[i] as i32)).clamp(0, 255) as f32 / 255.0;
+        let a = if cc == 1 {
+            est(0)
+        } else {
+            let (mut lo, mut hi, mut sum) = (1.0f32, 0.0f32, 0.0f32);
+            for i in 0..cc {
+                let e = est(i);
+                lo = lo.min(e);
+                hi = hi.max(e);
+                sum += e;
+            }
+            let mean = sum / cc as f32;
+            hi * mean + lo * (1.0 - mean)
+        };
+        let a = (a * 255.0 + 0.5).clamp(0.0, 255.0) as u32;
+        for &v in b {
+            out.push((v as u32 * 255 + a / 2).checked_div(a).map_or(0, |c| c.min(255) as u8));
+        }
+        out.push(a as u8);
+    }
+    out
+}
+
+/// The `trtexec` that builds TensorRT engines, and an environment prefix for it: `(None, None)`
+/// lets libaji use the one beside its backend library (always so on Windows, where the TensorRT
+/// runtime ships next to it).
+type Trtexec = (Option<PathBuf>, Option<String>);
+
+/// On Linux, a `trtexec` bundled beside libaji finds its TensorRT libraries there (the engine
+/// builds it runs get `LD_LIBRARY_PATH` pointing at that folder); without one, the system
+/// TensorRT's is used: NVIDIA's apt package (libnvinfer-bin) installs it in
+/// /usr/src/tensorrt/bin, which isn't on PATH, else whatever `trtexec` is on PATH.
+fn trtexec(aji_dir: &Path) -> Trtexec {
+    if cfg!(windows) {
+        return (None, None);
+    }
+    if aji_dir.join("trtexec").is_file() {
+        let dir = std::fs::canonicalize(aji_dir).unwrap_or_else(|_| aji_dir.to_path_buf());
+        // single-quoted for the shell; a ' inside becomes '\''
+        let quoted = dir.to_string_lossy().replace('\'', r"'\''");
+        return (None, Some(format!("LD_LIBRARY_PATH='{quoted}'${{LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}}")));
+    }
+    let on_path = std::env::var_os("PATH").and_then(|p| std::env::split_paths(&p).map(|d| d.join("trtexec")).find(|t| t.is_file()));
+    let system = [PathBuf::from("/usr/src/tensorrt/bin/trtexec")].into_iter().find(|t| t.is_file()).or(on_path);
+    (system, None)
 }
 
 /// The TensorRT context a TensorRT-RTX upscaler falls back to, opened on first need.
@@ -212,36 +298,38 @@ struct Fallback {
     aji: Aji,
     device_id: u64,
     cache_dir: Option<PathBuf>,
+    trtexec_env: Trtexec,
     ctx: Option<Result<Context, String>>,
 }
 
 impl Fallback {
     fn context(&mut self) -> Result<Context, String> {
-        let (aji, id, cache) = (&self.aji, self.device_id, &self.cache_dir);
+        let (aji, id, cache, env) = (&self.aji, self.device_id, &self.cache_dir, &self.trtexec_env);
         self.ctx
-            .get_or_insert_with(|| open_context(aji, Backend::TensorRt, id, cache))
+            .get_or_insert_with(|| open_context(aji, Backend::TensorRt, id, cache, env))
             .clone()
             .map_err(|e| format!("TensorRT fallback: {e}"))
     }
 }
 
-fn open_context(aji: &Aji, backend: Backend, device_id: u64, cache_dir: &Option<PathBuf>) -> Result<Context, String> {
+fn open_context(aji: &Aji, backend: Backend, device_id: u64, cache_dir: &Option<PathBuf>, trtexec: &Trtexec) -> Result<Context, String> {
     aji.context(&ContextParams {
         backend,
         device_id,
         cache_dir: cache_dir.clone(),
-        trtexec: None,
+        trtexec: trtexec.0.clone(),
+        trtexec_env: trtexec.1.clone(),
         log: Some(std::sync::Arc::new(|level, msg| {
             if level <= 2 {
-                eprintln!("[aji] {msg}");
+                progress::backend_log(msg);
             }
         })),
     })
 }
 
 /// Load `path` at `tile` on `ctx`, waiting out a background engine build (reported on stdout).
-fn load_model(ctx: &Context, backend: Backend, path: &Path, tile: u32, name: &str) -> Result<Model, String> {
-    let model = ctx.load_model(&LoadParams { onnx: path, tile: Some((tile, tile)), overlap: None, async_build: true })?;
+fn load_model(ctx: &Context, backend: Backend, path: &Path, tile: u32, overlap: Option<u32>, name: &str) -> Result<Model, String> {
+    let model = ctx.load_model(&LoadParams { onnx: path, tile: Some((tile, tile)), overlap, async_build: true })?;
     if model.state() == ModelState::Building {
         progress::engine_build(name, tile, backend.label());
         while model.state() == ModelState::Building {
@@ -321,6 +409,34 @@ fn hint_device(aji_dir: &Path, choice: BackendChoice, device_id: u64) -> Option<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn uniform_alpha_is_detected() {
+        assert_eq!(uniform_alpha(&[1, 2, 3, 128, 4, 5, 6, 128], 4), Some(128));
+        assert_eq!(uniform_alpha(&[1, 2, 3, 128, 4, 5, 6, 127], 4), None);
+        assert_eq!(uniform_alpha(&[9, 0, 8, 0], 2), Some(0));
+    }
+
+    #[test]
+    fn alpha_survives_an_identity_model() {
+        // With a model that changes nothing, the two passes give the alpha back (to rounding) and
+        // the color un-premultiplied (exact where alpha is high, coarser where it's low).
+        let px = [200u8, 100, 50, 255, 200, 100, 50, 128, 10, 20, 30, 0, 255, 255, 255, 64];
+        let (b, w) = on_black_and_white(&px, 4);
+        let out = recover_alpha(&b, &w, 3);
+        for (o, i) in out.as_chunks::<4>().0.iter().zip(px.as_chunks::<4>().0) {
+            assert!((o[3] as i32 - i[3] as i32).abs() <= 1, "alpha {} vs {}", o[3], i[3]);
+            if i[3] >= 64 {
+                for c in 0..3 {
+                    assert!((o[c] as i32 - i[c] as i32).abs() <= 4, "color {} vs {}", o[c], i[c]);
+                }
+            }
+        }
+        let gray = [100u8, 200, 30, 0];
+        let (b, w) = on_black_and_white(&gray, 2);
+        let out = recover_alpha(&b, &w, 1);
+        assert!((out[1] as i32 - 200).abs() <= 1 && out[3] == 0);
+    }
 
     #[test]
     fn resolve_takes_the_first_models_folder_that_has_the_file() {

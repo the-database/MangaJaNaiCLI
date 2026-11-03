@@ -52,8 +52,9 @@ pub fn prepare(bytes: &[u8], job: &Job, name: &str, resizer: &mut Resizer) -> Re
     let gray = stored_gray || is_grayscale(&img.pixels, job.threshold);
     let scale = chain::required_scale(job.target, (w, h));
     let chain = chain::select(&job.chains, (w, h), gray, scale).cloned();
+    let scale_s = if job.target == Target::Native { "model scale".to_string() } else { format!("{scale:.3}x") };
     match &chain {
-        Some(c) => crate::progress::log(&format!("{name}: {w}x{h} {}, {scale:.3}x, {}", if gray { "gray" } else { "color" }, describe(c))),
+        Some(c) => crate::progress::log(&format!("{name}: {w}x{h} {}, {scale_s}, {}", if gray { "gray" } else { "color" }, describe(c))),
         None => crate::progress::log(&format!("{name}: {w}x{h} {}, no chain matches; resizing only", if gray { "gray" } else { "color" })),
     }
 

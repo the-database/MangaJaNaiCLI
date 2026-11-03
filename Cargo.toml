@@ -2,12 +2,21 @@
 name = "mangajanai-cli"
 version = "0.1.4"
 edition = "2024"
-description = "MangaJaNai GUI's upscaling backend: batch manga/image upscaling on yosh-image + libaji"
+description = "mangajanaitrt and MangaJaNai GUI's upscaling backend: batch manga/image upscaling on yosh-image + libaji"
+
+[lib]
+name = "mangajanai_cli"
+path = "src/lib.rs"
 
 # The GUI ships and runs this as mangajanai_upscale.exe.
 [[bin]]
 name = "mangajanai_upscale"
 path = "src/main.rs"
+
+# The same program under its command-line name.
+[[bin]]
+name = "mangajanaitrt"
+path = "src/bin/mangajanaitrt.rs"
 
 [features]
 # AVIF input decoding (dav1d, a C library: needs nasm + meson, as yosh's CI builds it). Release

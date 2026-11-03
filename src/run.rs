@@ -1,6 +1,7 @@
-//! The batch: walk the input into an ordered stream of items, push them through a pipeline —
-//! parallel decode/prepare, one inference thread (the models live there), parallel resize/encode —
-//! and write the results back in input order, so archive entries keep their order.
+//! The batch: walk the inputs into an ordered stream of items, push them through a pipeline —
+//! parallel decode/prepare, one inference thread per GPU (the models live there; each takes the next
+//! prepared image when it's free), parallel resize/encode — and write the results back in input
+//! order, so archive entries keep their order.
 //!
 //! Nothing a single file does can stop the run: a file that fails is reported (`ERROR …`) and
 //! counted as done, an archive entry that can't be decoded is copied as-is, and every output is
@@ -20,9 +21,9 @@ use crate::process::{self, Job, Work};
 use crate::progress;
 use crate::upscaler::Upscaler;
 
-/// Inputs the GUI counts as images and archives (matched case-insensitively).
-pub const IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "webp", "bmp", "avif"];
-pub const ARCHIVE_EXTENSIONS: &[&str] = &["zip", "cbz", "rar", "cbr"];
+/// Inputs counted as images and archives (matched case-insensitively).
+pub const IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "webp", "bmp", "avif", "tif", "tiff", "jxl"];
+pub const ARCHIVE_EXTENSIONS: &[&str] = &["zip", "cbz", "rar", "cbr", "7z", "cb7"];
 /// Inside an archive, also try these as images (anything that fails to decode is copied as-is).
 const ENTRY_IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "webp", "bmp", "avif", "gif", "jxl", "tif", "tiff"];
 
@@ -114,7 +115,7 @@ impl Walker<'_> {
 
     fn skip(&self, path: &Path) -> bool {
         if !self.out.overwrite && path.exists() {
-            progress::log(&format!("file exists, skip: {}", path.display()));
+            progress::skipped(path);
             return true;
         }
         false
@@ -166,42 +167,77 @@ impl Walker<'_> {
     }
 }
 
-fn walk(input: &Input, out: &Output, format_ext: &str, tx: SyncSender<Item>) {
-    let mut w = Walker { tx, seq: 0, out };
+/// What one input holds: (source, output folder, is an archive, came from a folder walk), in order.
+/// A path that is neither an image nor an archive is left out (and reported, with `report`).
+fn plan(input: &Input, out: &Output, report: bool) -> Vec<(PathBuf, PathBuf, bool, bool)> {
+    let error = |what: &Path, msg: &str| {
+        if report {
+            progress::error(&what.display().to_string(), msg);
+        }
+    };
     match input {
         Input::File(path) => {
             if ext_in(path, ARCHIVE_EXTENSIONS) {
-                w.archive(path, &out.dir, format_ext);
+                vec![(path.clone(), out.dir.clone(), true, false)]
             } else if ext_in(path, IMAGE_EXTENSIONS) {
-                w.image(path, &out.dir, format_ext, false);
+                vec![(path.clone(), out.dir.clone(), false, false)]
             } else {
-                progress::error(&path.display().to_string(), "not an image or archive");
+                error(path, "not an image or archive");
+                Vec::new()
             }
         }
         Input::Folder { dir, images, archives } => {
             let files = match archive::walk_folder(dir, true) {
                 Ok(f) => f,
                 Err(e) => {
-                    progress::error(&dir.display().to_string(), &e.to_string());
-                    return;
+                    error(dir, &e.to_string());
+                    return Vec::new();
                 }
             };
-            for f in files {
-                let rel_dir = f.parent().and_then(|p| p.strip_prefix(dir).ok()).unwrap_or(Path::new(""));
-                let out_dir = out.dir.join(rel_dir);
-                let alive = if *images && ext_in(&f, IMAGE_EXTENSIONS) {
-                    w.image(&f, &out_dir, format_ext, true)
-                } else if *archives && ext_in(&f, ARCHIVE_EXTENSIONS) {
-                    w.archive(&f, &out_dir, format_ext)
-                } else {
-                    true
-                };
-                if !alive {
-                    return;
-                }
-            }
+            files
+                .into_iter()
+                .filter_map(|f| {
+                    let rel_dir = f.parent().and_then(|p| p.strip_prefix(dir).ok()).unwrap_or(Path::new(""));
+                    let out_dir = out.dir.join(rel_dir);
+                    if *images && ext_in(&f, IMAGE_EXTENSIONS) {
+                        Some((f, out_dir, false, true))
+                    } else if *archives && ext_in(&f, ARCHIVE_EXTENSIONS) {
+                        Some((f, out_dir, true, true))
+                    } else {
+                        None
+                    }
+                })
+                .collect()
         }
     }
+}
+
+fn walk(inputs: &[(PathBuf, PathBuf, bool, bool)], out: &Output, format_ext: &str, tx: SyncSender<Item>) {
+    let mut w = Walker { tx, seq: 0, out };
+    for (src, out_dir, is_archive, folder) in inputs {
+        let alive = if *is_archive { w.archive(src, out_dir, format_ext) } else { w.image(src, out_dir, format_ext, *folder) };
+        if !alive {
+            return;
+        }
+    }
+}
+
+/// How many items (images and archive entries) the run will write, for the progress bar: what
+/// `walk` sends, without reading any image (archives only list their entries).
+fn count(inputs: &[(PathBuf, PathBuf, bool, bool)], out: &Output, format_ext: &str) -> u64 {
+    inputs
+        .iter()
+        .map(|(src, out_dir, is_archive, _)| {
+            let ext = if *is_archive { "cbz" } else { format_ext };
+            if !out.overwrite && out_dir.join(out.name_for(src, ext)).exists() {
+                0
+            } else if *is_archive {
+                archive::list(src).map_or(0, |e| e.len() as u64)
+            } else {
+                1
+            }
+        })
+        .sum()
 }
 
 // ---- stages --------------------------------------------------------------------------------
@@ -420,16 +456,22 @@ impl Sink {
 
 // ---- the run -------------------------------------------------------------------------------
 
-/// Run the batch. `upscaler` is opened lazily by the inference thread (so a run that needs no
-/// model never loads the runtime); `open_upscaler` returns it or why it couldn't open.
-pub fn run(
-    input: Input,
-    output: Output,
-    job: Job,
-    open_upscaler: impl FnOnce() -> Result<Upscaler, String> + Send + 'static,
-) {
+/// Opens one inference thread's upscaler (one GPU), or says why it couldn't.
+pub type OpenUpscaler = Box<dyn FnOnce() -> Result<Upscaler, String> + Send>;
+
+/// How many items `run` will write for these inputs (see [`count`]), for a progress bar.
+pub fn total(inputs: &[Input], output: &Output, job: &Job) -> u64 {
+    let planned: Vec<_> = inputs.iter().flat_map(|i| plan(i, output, false)).collect();
+    count(&planned, output, job.format.ext())
+}
+
+/// Run the batch over `inputs`, in order. Each of `upscalers` (one per GPU) gets an inference
+/// thread that opens it lazily (so a run that needs no model never loads the runtime) and then takes
+/// prepared images as it frees up.
+pub fn run(inputs: Vec<Input>, output: Output, job: Job, upscalers: Vec<OpenUpscaler>) {
     let threads = thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
-    let n = (threads / 2).clamp(2, 8);
+    let gpus = upscalers.len().max(1);
+    let n = (threads / 2).clamp(2, 8).max(2 * gpus).min(threads.max(2));
     let job = Arc::new(job);
     let format_ext = job.format.ext().to_string();
 
@@ -441,36 +483,44 @@ pub fn run(
     let j = job.clone();
     let mut handles = workers(n, item_rx, prep_tx, move |item, r| prepare_stage(item, &j, r));
 
-    handles.push(thread::spawn(move || {
-        let mut up: Option<Upscaler> = None;
-        let mut up_err: Option<String> = None;
-        let mut open = Some(open_upscaler);
-        for stage in prep_rx {
-            if let Stage::Work { work, .. } = &stage
-                && needs_model(work)
-                && let Some(open) = open.take()
-            {
-                match open() {
-                    Ok(u) => {
-                        progress::log(&format!("Upscaling with {}", u.description));
-                        up = Some(u);
-                    }
-                    Err(e) => {
-                        progress::error("upscaling backend", &e);
-                        up_err = Some(e);
+    let prep_rx = Arc::new(Mutex::new(prep_rx));
+    for open_upscaler in upscalers {
+        let (prep_rx, infer_tx) = (prep_rx.clone(), infer_tx.clone());
+        handles.push(thread::spawn(move || {
+            let mut up: Option<Upscaler> = None;
+            let mut up_err: Option<String> = None;
+            let mut open = Some(open_upscaler);
+            loop {
+                let next = prep_rx.lock().unwrap_or_else(|p| p.into_inner()).recv();
+                let Ok(stage) = next else { break };
+                if let Stage::Work { work, .. } = &stage
+                    && needs_model(work)
+                    && let Some(open) = open.take()
+                {
+                    match open() {
+                        Ok(u) => {
+                            progress::info(&format!("Upscaling with {}", u.description));
+                            up = Some(u);
+                        }
+                        Err(e) => {
+                            progress::error("upscaling backend", &e);
+                            up_err = Some(e);
+                        }
                     }
                 }
+                if infer_tx.send(infer_stage(stage, &mut up, &up_err)).is_err() {
+                    break;
+                }
             }
-            if infer_tx.send(infer_stage(stage, &mut up, &up_err)).is_err() {
-                break;
-            }
-        }
-    }));
+        }));
+    }
+    drop(infer_tx);
 
     let j = job.clone();
     handles.extend(workers(n, infer_rx, done_tx, move |stage, r| finish_stage(stage, &j, r)));
 
-    let walker = thread::spawn(move || walk(&input, &output, &format_ext, item_tx));
+    let planned: Vec<_> = inputs.iter().flat_map(|i| plan(i, &output, true)).collect();
+    let walker = thread::spawn(move || walk(&planned, &output, &format_ext, item_tx));
 
     // Write results in input order.
     let mut sink = Sink { archive: None };

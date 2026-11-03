@@ -10,6 +10,26 @@ use yosh_image::aji::{Aji, Backend, Context, ContextParams, Device, LoadParams, 
 
 use crate::{precision, progress};
 
+/// Load libaji from `dir`. On Linux, first load the CUDA and TensorRT libraries `mangajanai setup`
+/// put beside it, by full path and globally: libaji_trt.so asks for them by soname, which then
+/// resolves to these without LD_LIBRARY_PATH or a system install. (Its engine builds run trtexec,
+/// which gets LD_LIBRARY_PATH from `trtexec()`.) A system TensorRT works as before.
+pub fn load_aji(dir: &Path) -> Result<Aji, String> {
+    #[cfg(unix)]
+    for lib in ["libcudart.so.13", "libnvinfer.so.11", "libnvinfer_plugin.so.11", "libnvonnxparser.so.11"] {
+        use libloading::os::unix::{Library, RTLD_GLOBAL, RTLD_NOW};
+        let path = dir.join(lib);
+        if path.is_file() {
+            // SAFETY: NVIDIA's libraries; their initializers only set up their own state. Kept
+            // loaded for the process's life (libaji uses them until exit).
+            if let Ok(l) = unsafe { Library::open(Some(&path), RTLD_NOW | RTLD_GLOBAL) } {
+                std::mem::forget(l);
+            }
+        }
+    }
+    Aji::load(dir)
+}
+
 /// Which backend to run on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BackendChoice {
@@ -99,7 +119,7 @@ impl Upscaler {
         overlap: Option<u32>,
         even_tiles: bool,
     ) -> Result<Self, String> {
-        let aji = Aji::load(aji_dir)?;
+        let aji = load_aji(aji_dir)?;
         let trtexec_env = trtexec(aji_dir);
         let mut err = String::from("no compatible GPU found");
         for &backend in choice.candidates() {
@@ -354,7 +374,7 @@ fn load_model(ctx: &Context, backend: Backend, path: &Path, tile: u32, overlap: 
 /// value; `compute_capability` as "major.minor", null on DirectML). An unloadable backend is an
 /// empty list.
 pub fn devices_json(aji_dir: &Path, backend: Backend) -> Result<String, String> {
-    let aji = Aji::load(aji_dir)?;
+    let aji = load_aji(aji_dir)?;
     let devices = aji.devices(backend).unwrap_or_default();
     let list: Vec<_> = devices
         .iter()
@@ -396,7 +416,7 @@ pub fn model_info_json(path: &Path, aji_dir: &Path, backend: Option<BackendChoic
 /// device lists tell (no context is opened): the first of [`BackendChoice::candidates`] that lists
 /// a device, and on it the device with that id, else its first.
 fn hint_device(aji_dir: &Path, choice: BackendChoice, device_id: u64) -> Option<(Backend, Device)> {
-    let aji = match Aji::load(aji_dir) {
+    let aji = match load_aji(aji_dir) {
         Ok(a) => a,
         Err(e) => {
             eprintln!("no hint: {e}");

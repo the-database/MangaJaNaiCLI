@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build the TensorRT runtime packs that `mangajanai setup` installs.
+"""Build the runtime packs that `mangajanai setup` installs, published on one release (TAG).
 
 NVIDIA ships TensorRT as one archive with builder resources for every GPU generation (several GB).
 This splits it into packs so a machine downloads only what it needs:
@@ -9,6 +9,9 @@ This splits it into packs so a machine downloads only what it needs:
     trt-<smNN|ptx>-<platform>.7z  the builder resources for one GPU generation (PTX: the fallback
                                   for generations without their own)
 
+    dml-runtime-windows-x64.7z    ONNX Runtime + DirectML (AMD/Intel GPUs; Auto's fallback): the
+                                  two DLLs out of NuGet packages that bundle every architecture
+
 plus packs-<platform>.json: each pack's sha256, size, unpacked size and file list. Files sit at
 each archive's root, so extracting into the runtime folder installs them.
 
@@ -17,8 +20,8 @@ Sources are pinned below and every download is checked against its SHA-256:
     linux    NVIDIA's CUDA apt-repo packages (per-file SHA-256 from its Packages index) + the CUDA
              redistributable cudart tarball. Needs dpkg-deb (Debian/Ubuntu).
 
-usage: trt_packs.py --print-version
-       trt_packs.py --platform windows|linux --out DIR [--work DIR] [--local-dir DIR] [--sevenzip PATH]
+usage: runtime_packs.py --print-tag
+       runtime_packs.py --platform windows|linux --out DIR [--work DIR] [--local-dir DIR] [--sevenzip PATH]
   --local-dir  take the files from a folder that already holds them (flat), instead of downloading
 """
 
@@ -33,6 +36,9 @@ import sys
 import tarfile
 import urllib.request
 import zipfile
+
+# The release these packs go on. Bump it whenever a pinned version below changes; the CLI pins it.
+TAG = "runtime-1"
 
 TRT_VERSION = "11.4.0.106"
 TRT_CUDA = "13.4"
@@ -54,6 +60,14 @@ DEB_SHA256 = {
     "libnvonnxparsers11": "d7b0e623e6b8d1c368a000b996938494137e2584b85e2eed8b89f7b34092436c",
     "libnvinfer-bin": "36b0a4f11c3a15bf9f2d4eb5a33ce02b7248582eb384696a1d80a154abf005f8",
 }
+
+# ONNX Runtime + DirectML for aji_dml.dll (the same versions as MangaJaNai GUI), from NuGet; SHA-256
+# recorded from a verified download (NuGet publishes none).
+ORT_DML = ("Microsoft.ML.OnnxRuntime.DirectML", "1.24.4", "57e9f11b73437bef7a309496135d4c1f96b1a8e9ddba60013fa27bfc1d788681",
+           {"runtimes/win-x64/native/onnxruntime.dll": "onnxruntime.dll"})
+DIRECTML = ("Microsoft.AI.DirectML", "1.15.4", "4e7cb7ddce8cf837a7a75dc029209b520ca0101470fcdf275c1f49736a3615b9",
+            {"bin/x64-win/DirectML.dll": "DirectML.dll", "LICENSE.txt": "DirectML_LICENSE.txt"})
+DML_FILES = {"onnxruntime.dll", "DirectML.dll", "DirectML_LICENSE.txt"}
 
 WIN_KEEP = {"nvinfer_11.dll", "nvinfer_plugin_11.dll", "nvonnxparser_11.dll", "trtexec.exe"}
 BUILDER = re.compile(r"builder_resource_([a-z0-9]+)[._]")
@@ -115,6 +129,15 @@ def stage_windows(work, stage):
                     shutil.copyfileobj(src, dst)
 
 
+def stage_dml(work, stage):
+    for name, ver, want, files in (ORT_DML, DIRECTML):
+        p = fetch(f"https://www.nuget.org/api/v2/package/{name}/{ver}", os.path.join(work, f"{name}.{ver}.nupkg"), want)
+        with zipfile.ZipFile(p) as zf:
+            for src, dst in files.items():
+                with zf.open(src) as s, open(os.path.join(stage, dst), "wb") as d:
+                    shutil.copyfileobj(s, d, 1 << 20)
+
+
 def stage_linux(work, stage):
     root = os.path.join(work, "debroot")
     shutil.rmtree(root, ignore_errors=True)
@@ -131,7 +154,10 @@ def stage_linux(work, stage):
     for name in os.listdir(lib):
         if BUILDER.search(name) and not os.path.islink(os.path.join(lib, name)):
             shutil.copyfile(os.path.join(lib, name), os.path.join(stage, name))
-    shutil.copyfile(os.path.join(root, "usr", "src", "tensorrt", "bin", "trtexec"), os.path.join(stage, "trtexec"))
+    # libnvinfer-bin puts trtexec in /usr/bin (11.x) or /usr/src/tensorrt/bin (10.x).
+    trtexec = next(p for p in (os.path.join(root, "usr", "bin", "trtexec"),
+                               os.path.join(root, "usr", "src", "tensorrt", "bin", "trtexec")) if os.path.exists(p))
+    shutil.copyfile(trtexec, os.path.join(stage, "trtexec"))
     os.chmod(os.path.join(stage, "trtexec"), 0o755)
     copyright_ = os.path.join(root, "usr", "share", "doc", "libnvinfer11", "copyright")
     if os.path.exists(copyright_):
@@ -149,21 +175,27 @@ def stage_linux(work, stage):
 
 
 def pack_of(name):
+    if name in DML_FILES:
+        return "dml-runtime"
     m = BUILDER.search(name)
     return f"trt-{m.group(1)}" if m else "trt-runtime"
 
 
+def pack_version(name):
+    return f"ort-{ORT_DML[1]}+dml-{DIRECTML[1]}" if name == "dml-runtime" else f"trt-{TRT_VERSION}"
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--print-version", action="store_true", help="print the TensorRT version and exit")
+    ap.add_argument("--print-tag", action="store_true", help="print the release tag and exit")
     ap.add_argument("--platform", choices=["windows", "linux"])
     ap.add_argument("--out")
     ap.add_argument("--work", default="trt-work")
     ap.add_argument("--local-dir")
     ap.add_argument("--sevenzip", default=shutil.which("7z") or r"C:\Program Files\7-Zip\7z.exe")
     a = ap.parse_args()
-    if a.print_version:
-        print(TRT_VERSION)
+    if a.print_tag:
+        print(TAG)
         return
     if not a.platform or not a.out:
         ap.error("--platform and --out are required")
@@ -175,13 +207,14 @@ def main():
     os.makedirs(stage)
     if a.local_dir:
         for name in os.listdir(a.local_dir):
-            keep = (name in WIN_KEEP or BUILDER.search(name) or re.fullmatch(r"cudart64_\d+\.dll", name)
+            keep = (name in WIN_KEEP or name in DML_FILES or BUILDER.search(name) or re.fullmatch(r"cudart64_\d+\.dll", name)
                     or name in ("TensorRT_Acknowledgements.txt", "CUDA_LICENSE.txt", "trtexec")
                     or re.fullmatch(r"lib(nvinfer|nvinfer_plugin|nvonnxparser)\.so\.11|libcudart\.so\.13", name))
             if keep:
                 shutil.copyfile(os.path.join(a.local_dir, name), os.path.join(stage, name))
     elif a.platform == "windows":
         stage_windows(a.work, stage)
+        stage_dml(a.work, stage)
     else:
         stage_linux(a.work, stage)
 
@@ -190,7 +223,7 @@ def main():
         groups.setdefault(pack_of(name), []).append(name)
     if "trt-runtime" not in groups or not any(g != "trt-runtime" for g in groups):
         sys.exit(f"incomplete runtime: {groups}")
-    index = {"trt_version": TRT_VERSION, "cuda": TRT_CUDA, "platform": plat, "packs": []}
+    index = {"tag": TAG, "platform": plat, "packs": []}
     for name, files in sorted(groups.items()):
         asset = f"{name}-{plat}.7z"
         dest = os.path.abspath(os.path.join(a.out, asset))
@@ -203,6 +236,7 @@ def main():
                        cwd=stage, check=True)
         index["packs"].append({
             "name": name,
+            "version": pack_version(name),
             "asset": asset,
             "sha256": sha256(dest),
             "bytes": os.path.getsize(dest),

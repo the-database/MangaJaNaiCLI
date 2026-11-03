@@ -1,0 +1,69 @@
+name: runtime-packs
+
+# The runtime packs `mangajanai setup` installs (scripts/runtime_packs.py): NVIDIA's TensorRT split
+# into trt-runtime plus one builder-resource pack per GPU generation (Windows and Linux), and ONNX
+# Runtime + DirectML (Windows), with packs-<platform>.json (versions, sha256, sizes, file lists).
+# Published on their own tag (TAG in the script, runtime-<n>), so CLI releases never re-upload them.
+# Run this only after bumping TAG along with a pinned version; the CLI pins the tag and each index's
+# SHA-256.
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: Build packs
+        run: python scripts/runtime_packs.py --platform windows --out packs --work ${{ runner.temp }}/runtime-work --sevenzip "C:\Program Files\7-Zip\7z.exe"
+      - uses: actions/upload-artifact@v6
+        with:
+          name: runtime-packs-windows
+          path: packs/*
+
+  linux:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install 7-Zip
+        run: sudo apt-get update && sudo apt-get install -y p7zip-full
+      - name: Build packs
+        run: python3 scripts/runtime_packs.py --platform linux --out packs --work ${{ runner.temp }}/runtime-work
+      - uses: actions/upload-artifact@v6
+        with:
+          name: runtime-packs-linux
+          path: packs/*
+
+  publish:
+    needs: [windows, linux]
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v6
+        with:
+          path: packs
+          merge-multiple: true
+      - name: Publish the runtime-<n> release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag=$(python3 scripts/runtime_packs.py --print-tag)
+          ls -la packs
+          sha256sum packs/packs-*.json
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" packs/* --clobber
+          else
+            gh release create "$tag" packs/* --title "Runtime packs ($tag)" --latest=false --notes-file - <<'NOTES'
+          Runtime packs for `mangajanai setup`:
+          - NVIDIA TensorRT 11.4.0.106 (CUDA 13.4), split into trt-runtime plus one builder-resource pack per GPU generation (trt-sm75 … trt-sm120; trt-ptx is the fallback), for Windows and Linux.
+          - ONNX Runtime 1.24.4 + DirectML 1.15.4 for Windows (dml-runtime).
+
+          packs-<platform>.json lists each pack's version, SHA-256, size and files. TensorRT is NVIDIA proprietary software, redistributed under its license; NVIDIA's and Microsoft's notices ship in the packs.
+          NOTES
+          fi

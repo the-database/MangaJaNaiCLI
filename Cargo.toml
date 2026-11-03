@@ -38,6 +38,12 @@ png = "0.18"
 jpeg-encoder = "0.7.1"
 webp = "0.3.1"
 ravif = { version = "0.13.0", default-features = false, features = ["threading"] }
+# `mangajanai setup`: HTTPS downloads (ureq over rustls, as yosh's self-update), SHA-256 checks, the
+# 7z packs (sevenz-rust2, the decoder yosh-image already uses) and NVML for GPU detection.
+ureq = "3"
+sha2 = "0.10"
+sevenz-rust2 = { version = "0.24", default-features = false, features = ["util"] }
+libloading = "0.8"
 
 [build-dependencies]
 embed-manifest = "1.5.1"

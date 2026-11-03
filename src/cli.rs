@@ -22,6 +22,8 @@ Usage:
   {prog} init [file]                    write a commented {CONFIG_NAME} to start from
   {prog} devices [--backend b]          list the GPUs (the numbers --device takes)
   {prog} bench <model.onnx> [options]   time a model on a synthetic image
+  {prog} setup [--no-models] [--check]  download what this PC needs to upscale (the GPU runtime and
+                                        the models), next to the program; run it again to update
 
 With no inputs on the command line, `input` from the settings file is used. The settings file is
 -c <file>, else {CONFIG_NAME} in the current folder, else next to the program; flags override it.
@@ -88,7 +90,9 @@ fn exe_dir() -> PathBuf {
 fn default_aji_dir() -> PathBuf {
     let lib = if cfg!(windows) { "aji.dll" } else { "libaji.so" };
     let exe = exe_dir();
-    if exe.join(lib).is_file() {
+    // libaji ships next to the program; it's usable there once `mangajanai setup` added the runtime
+    // (or a runtime was copied in by hand), else an installed MangaJaNai GUI's is the better pick.
+    if exe.join(lib).is_file() && crate::setup::runtime_installed(&exe) {
         return exe;
     }
     if cfg!(windows)
@@ -151,6 +155,10 @@ struct Flags {
     iters: Option<u32>,
     gray: bool,
     force: bool,
+    // setup
+    no_models: bool,
+    check: bool,
+    mirror: Option<PathBuf>,
 }
 
 fn num<T: std::str::FromStr>(name: &str, v: &str) -> Result<T, String> {
@@ -229,6 +237,9 @@ fn parse_flags(args: Vec<String>) -> Result<Flags, String> {
             "--iters" => f.iters = Some(num(&key, &value(&key)?)?),
             "--gray" => f.gray = true,
             "--force" => f.force = true,
+            "--no-models" => f.no_models = true,
+            "--check" => f.check = true,
+            "--mirror" => f.mirror = Some(value(&key)?.into()),
             "-V" | "--version" => {
                 println!("{} {}", prog_name(), env!("CARGO_PKG_VERSION"));
                 std::process::exit(0);
@@ -260,13 +271,16 @@ pub fn main() {
 }
 
 fn dispatch(mut args: Vec<String>) -> Result<i32, String> {
-    let sub = args.first().filter(|a| matches!(a.as_str(), "init" | "devices" | "bench") && !Path::new(a.as_str()).exists()).cloned();
+    let sub = args.first().filter(|a| matches!(a.as_str(), "init" | "devices" | "bench" | "setup") && !Path::new(a.as_str()).exists()).cloned();
     if sub.is_some() {
         args.remove(0);
     }
     let flags = parse_flags(args)?;
     match sub.as_deref() {
         Some("init") => return init(&flags),
+        Some("setup") => {
+            return crate::setup::run(&crate::setup::Options { no_models: flags.no_models, check: flags.check, mirror: flags.mirror.clone() });
+        }
         Some("devices") => return devices(&flags),
         Some("bench") => return bench(flags),
         _ => {}
@@ -687,7 +701,7 @@ fn device_ids(aji_dir: &Path, backend: BackendChoice, spec: Option<&str>) -> Res
     if spec.is_empty() || spec.eq_ignore_ascii_case("first") {
         return Ok(vec![0]);
     }
-    let aji = yosh_image::aji::Aji::load(aji_dir).map_err(|e| format!("loading libaji from {}: {e}", aji_dir.display()))?;
+    let aji = upscaler::load_aji(aji_dir).map_err(|e| format!("loading libaji from {}: {e}", aji_dir.display()))?;
     let devices = backend
         .candidates()
         .iter()
@@ -716,8 +730,35 @@ fn device_ids(aji_dir: &Path, backend: BackendChoice, spec: Option<&str>) -> Res
     Ok(ids)
 }
 
+/// Before a run that would find no GPU runtime: say how to get one, and in a terminal offer to run
+/// `mangajanai setup` now. Ok(false) = don't run.
+fn ensure_runtime(aji_dir: &Path) -> Result<bool, String> {
+    let lib = if cfg!(windows) { "aji.dll" } else { "libaji.so" };
+    if crate::setup::runtime_installed(aji_dir) || (aji_dir != exe_dir() && aji_dir.join(lib).is_file()) {
+        return Ok(true);
+    }
+    eprintln!("No GPU runtime found next to mangajanai ({}).", aji_dir.display());
+    eprintln!("`mangajanai setup` downloads what this PC needs, once: the TensorRT or DirectML runtime and the models.");
+    use std::io::{BufRead, IsTerminal, Write};
+    if !std::io::stdin().is_terminal() || !std::io::stderr().is_terminal() {
+        return Ok(false);
+    }
+    eprint!("Run setup now? [Y/n] ");
+    let _ = std::io::stderr().flush();
+    let mut answer = String::new();
+    let _ = std::io::stdin().lock().read_line(&mut answer);
+    if matches!(answer.trim().to_ascii_lowercase().as_str(), "" | "y" | "yes") {
+        Ok(crate::setup::run(&crate::setup::Options { no_models: false, check: false, mirror: None })? == 0)
+    } else {
+        Ok(false)
+    }
+}
+
 fn upscale(flags: Flags) -> Result<i32, String> {
     let plan = resolve(&flags)?;
+    if flags.aji_dir.is_none() && !ensure_runtime(&plan.aji_dir)? {
+        return Ok(1);
+    }
     let ids: Vec<u64> = device_ids(&plan.aji_dir, plan.backend, plan.device.as_deref())?
         .into_iter()
         .flat_map(|id| std::iter::repeat_n(id, plan.streams as usize))
@@ -755,9 +796,9 @@ fn init(flags: &Flags) -> Result<i32, String> {
 }
 
 fn devices(flags: &Flags) -> Result<i32, String> {
-    use yosh_image::aji::{Aji, Backend};
+    use yosh_image::aji::Backend;
     let aji_dir = flags.aji_dir.clone().unwrap_or_else(default_aji_dir);
-    let aji = Aji::load(&aji_dir).map_err(|e| format!("loading libaji from {}: {e}", aji_dir.display()))?;
+    let aji = upscaler::load_aji(&aji_dir).map_err(|e| format!("loading libaji from {}: {e}", aji_dir.display()))?;
     let backends: Vec<Backend> = match flags.backend {
         Some(b) => b.candidates().to_vec(),
         None if cfg!(windows) => vec![Backend::TensorRt, Backend::TensorRtRtx, Backend::DirectMl],

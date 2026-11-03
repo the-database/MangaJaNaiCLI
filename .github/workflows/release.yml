@@ -4,10 +4,10 @@ name: release
 # two names). A v* tag matching Cargo.toml's version builds and publishes a Release with:
 #   mangajanai-cli-windows-x64.zip   mangajanai_upscale.exe alone: MangaJaNaiConverterGui's package
 #                                    builder downloads it from the release whose tag it pins
-#   mangajanai-windows-x64.zip       mangajanai.exe; uses libaji from an installed MangaJaNai GUI,
-#                                    or aji-windows-x64.zip + the TensorRT runtime beside it
-#   mangajanai-linux-x64.tar.zst     mangajanai + libaji (TensorRT backend); TensorRT itself comes
-#                                    from NVIDIA's apt packages
+#   mangajanai-windows-x64.zip       mangajanai.exe + libaji + the VC++ runtime
+#   mangajanai-linux-x64.tar.zst     mangajanai + libaji (TensorRT backend)
+# `mangajanai setup` then downloads the GPU runtime (the runtime-<n> release, runtime-packs.yml) and
+# the models next to the program.
 on:
   push:
     tags: ['v*']                   # tag a version -> build + publish a Release
@@ -97,13 +97,31 @@ jobs:
         env:
           RUSTFLAGS: "-C target-feature=+crt-static"
 
+      # mangajanai-cli-windows-x64.zip: mangajanai_upscale.exe alone, as MangaJaNai GUI's builder expects.
+      # mangajanai-windows-x64.zip: mangajanai.exe with libaji (AJI_VERSION) and the VC++ runtime its
+      # DLLs link dynamically (app-local, as the redistributable terms allow), so `mangajanai setup`
+      # only has to fetch the GPU runtime and the models.
       - name: Package
         shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          New-Item -ItemType Directory -Force package, package-trt | Out-Null
+          New-Item -ItemType Directory -Force package, package-trt, aji | Out-Null
           Copy-Item target/release/mangajanai_upscale.exe package/
           Compress-Archive -Path package/* -DestinationPath mangajanai-cli-windows-x64.zip -Force
           Copy-Item target/release/mangajanai.exe package-trt/
+          gh release download $env:AJI_VERSION -R the-database/animejanai-inference -p aji-windows-x64.zip
+          Expand-Archive aji-windows-x64.zip aji
+          foreach ($f in 'aji.dll', 'aji_trt.dll', 'aji_dml.dll') { Copy-Item "aji/$f" package-trt/ }
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * `
+            -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          $crt = Get-ChildItem "$vs\VC\Redist\MSVC\*\x64\Microsoft.VC14*.CRT" -Directory |
+            Where-Object { $_.Parent.Parent.Name -match '^\d+(\.\d+)+$' } |
+            Sort-Object { [version]$_.Parent.Parent.Name } | Select-Object -Last 1
+          if (-not $crt) { throw "VC++ runtime (Microsoft.VC14x.CRT) not found under $vs" }
+          Write-Host "VC++ runtime: $($crt.FullName)"
+          Copy-Item "$($crt.FullName)\*.dll" package-trt/
+          Get-ChildItem package-trt | Format-Table Name, Length
           Compress-Archive -Path package-trt/* -DestinationPath mangajanai-windows-x64.zip -Force
 
       - name: Upload build artifact

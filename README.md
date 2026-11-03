@@ -24,23 +24,25 @@ The command is `mangajanai`. The same program is MangaJaNai GUI's upscaling back
 
 ## Install
 
-Download from [Releases](https://github.com/the-database/MangaJaNaiCLI/releases).
+1. Download `mangajanai-windows-x64.zip` or `mangajanai-linux-x64.tar.zst` from
+   [Releases](https://github.com/the-database/MangaJaNaiCLI/releases) and unpack it anywhere.
+2. Run `mangajanai setup`. It detects the GPU and downloads what this PC needs, into the same folder:
+   - the TensorRT runtime and the builder files for your GPU's generation (NVIDIA);
+   - TensorRT-RTX (Windows, RTX 20 series and newer);
+   - DirectML (Windows, for any GPU);
+   - the MangaJaNai and IllustrationJaNai models (skip them with `--no-models`).
 
-**Windows**: unzip `mangajanai-windows-x64.zip` anywhere. With MangaJaNai GUI installed nothing
-else is needed: mangajanai uses the GUI's inference runtime and finds its models. Otherwise extract
-libaji (`aji-windows-x64.zip` from animejanai-inference's releases) and the TensorRT runtime next to
-`mangajanai.exe`, or point `--aji-dir` at a folder that has them (e.g. an mpv-AnimeJaNai
-`animejanai\inference` folder).
+   `mangajanai setup --check` lists what it would download without downloading. Run `mangajanai setup`
+   again after an update to fetch what changed. Every download is checked against a pinned SHA-256.
+3. Run `mangajanai <input> -o <output>`.
 
-**Linux** (TensorRT only): an NVIDIA driver plus TensorRT 11 from NVIDIA's CUDA apt repository:
+All you need beforehand is a GPU driver. On Linux, mangajanai runs on TensorRT only, so it needs an
+NVIDIA GPU and driver. The runtime comes from setup; no CUDA or TensorRT install is needed.
 
-```sh
-sudo apt-get install libnvinfer11 libnvinfer-plugin11 libnvonnxparsers11 libnvinfer-bin
-tar --zstd -xf mangajanai-linux-x64.tar.zst -C ~/mangajanai   # mangajanai + libaji
-```
-
-`trtexec` (which builds engines) is found in `/usr/src/tensorrt/bin`, where `libnvinfer-bin` puts it,
-on `PATH`, or beside `libaji.so`.
+On Windows, if you skip setup and MangaJaNai GUI is installed, mangajanai uses the GUI's inference
+runtime and models. To use a runtime from elsewhere instead (e.g. an mpv-AnimeJaNai
+`animejanai\inference` folder), pass `--aji-dir <folder>`. On Linux, a system TensorRT 11 from NVIDIA's
+CUDA apt repository works too: `trtexec` is then found on `PATH`.
 
 ## Use
 

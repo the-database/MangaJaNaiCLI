@@ -51,8 +51,26 @@ version. Assets:
 
 - `mangajanai-cli-windows-x64.zip` holds `mangajanai_upscale.exe` alone. MangaJaNaiConverterGui's
   `BuildMangaJaNai/Program.cs` downloads it by tag (`CliVersion`). Keep its name and contents.
-- `mangajanai-windows-x64.zip` holds `mangajanai.exe`.
+- `mangajanai-windows-x64.zip` holds `mangajanai.exe` + libaji + the VC++ runtime DLLs.
 - `mangajanai-linux-x64.tar.zst` holds `mangajanai` + libaji.
+
+`mangajanai setup` (`src/setup.rs`) installs the rest next to the program, tracked in `setup.json`.
+It picks the components from the GPUs it finds through NVML (`src/nvml.rs`):
+
+- The runtime packs: TensorRT's runtime, plus one builder-resource pack per GPU generation, and
+  ONNX Runtime + DirectML. They live on their own `runtime-<n>` release, published by
+  `.github/workflows/runtime-packs.yml` (`scripts/runtime_packs.py`), not on CLI releases.
+  `setup.rs` pins `RUNTIME_TAG` and the SHA-256 of each `packs-<platform>.json` index.
+- TensorRT-RTX, from the libaji release.
+- The models: the same archives MangaJaNai GUI installs.
+
+To change a TensorRT/ORT/DirectML version:
+
+1. Bump `TAG` and the pins in `runtime_packs.py`.
+2. Run the workflow.
+3. Update `RUNTIME_TAG` and the index hashes.
+
+`--mirror <folder>` installs from local archives, for testing before anything is published.
 
 Releases before the move (0.1.x) are on the-database/yosh under `mangajanai-cli-v*` tags.
 

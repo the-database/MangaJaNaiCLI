@@ -54,10 +54,13 @@ Saving:
 GPU:
   --backend <b>             auto (default) | tensorrt | directml | tensorrt-rtx
   --device <d>              first (default) | all | 0,1 (numbers from `{prog} devices`)
-  --streams <n>             inference threads per GPU (default 1; 2 keeps the GPU busier,
-                            ~20-45% faster, for about twice the VRAM)
+  --streams <n>             inference threads per GPU (default 1; with libaji's GPU tiling,
+                            2 rarely helps, for about twice the VRAM)
   --tile <px>               tile size (default 512; one engine per model and tile)
-  --overlap <px>            tile overlap (default 32)
+  --overlap <px>            minimum tile overlap (default: libaji's, 128)
+  --even-tiles              TensorRT: split each page into even tiles of at most --tile from
+                            one engine for all tile shapes: fewer pixels inferred, often
+                            faster (slower per pixel on TensorRT-RTX)
   --cache-dir <dir>         TensorRT engine cache (default: next to each model)
   --aji-dir <dir>           where aji.dll / libaji.so is (default: next to the program, else an
                             installed MangaJaNai GUI's inference folder)
@@ -138,6 +141,7 @@ struct Flags {
     streams: Option<u32>,
     tile: Option<u32>,
     overlap: Option<u32>,
+    even_tiles: Option<bool>,
     cache_dir: Option<PathBuf>,
     aji_dir: Option<PathBuf>,
     verbose: bool,
@@ -208,6 +212,8 @@ fn parse_flags(args: Vec<String>) -> Result<Flags, String> {
             "--streams" => f.streams = Some(num::<u32>(&key, &value(&key)?)?.clamp(1, 8)),
             "--tile" => f.tile = Some(num(&key, &value(&key)?)?),
             "--overlap" => f.overlap = Some(num(&key, &value(&key)?)?),
+            "--even-tiles" => f.even_tiles = Some(true),
+            "--fixed-tiles" => f.even_tiles = Some(false),
             "--cache-dir" => f.cache_dir = Some(value(&key)?.into()),
             "--aji-dir" => f.aji_dir = Some(value(&key)?.into()),
             "-v" | "--verbose" => f.verbose = true,
@@ -373,7 +379,7 @@ fn gui_run(flags: Flags) -> i32 {
     let start = Instant::now();
     let backend = flags.backend.unwrap_or(BackendChoice::Auto);
     let (aji_dir, cache_dir) = (flags.aji_dir.clone().unwrap_or_else(exe_dir), flags.cache_dir.clone());
-    let open: run::OpenUpscaler = Box::new(move || Upscaler::open(&aji_dir, backend, device, cache_dir, models_dirs, None));
+    let open: run::OpenUpscaler = Box::new(move || Upscaler::open(&aji_dir, backend, device, cache_dir, models_dirs, None, false));
     run::run(vec![input], output, job, vec![open]);
     progress::finish(start.elapsed());
     0
@@ -504,6 +510,7 @@ struct Plan {
     device: Option<String>,
     streams: u32,
     overlap: Option<u32>,
+    even_tiles: bool,
     cache_dir: Option<PathBuf>,
     aji_dir: PathBuf,
     models_dirs: Vec<PathBuf>,
@@ -664,6 +671,7 @@ fn resolve(flags: &Flags) -> Result<Plan, String> {
         device: flags.device.clone().or(file.and_then(|f| f.gpu.devices.clone())),
         streams: flags.streams.or(file.and_then(|f| f.gpu.streams)).unwrap_or(1).clamp(1, 8),
         overlap: flags.overlap.or(file.and_then(|f| f.gpu.overlap)),
+        even_tiles: flags.even_tiles.or(file.and_then(|f| f.gpu.even_tiles)).unwrap_or(false),
         cache_dir: flags.cache_dir.clone().or(file.and_then(|f| f.gpu.cache_dir.as_deref().map(|c| config::rel(&base, c)))),
         models_dirs: models_dirs(flags, file.map(|f| (base.as_path(), f)), &aji_dir),
         aji_dir,
@@ -723,8 +731,9 @@ fn upscale(flags: Flags) -> Result<i32, String> {
     let openers: Vec<run::OpenUpscaler> = ids
         .into_iter()
         .map(|id| {
-            let (aji_dir, cache_dir, dirs, backend, overlap) = (plan.aji_dir.clone(), plan.cache_dir.clone(), plan.models_dirs.clone(), plan.backend, plan.overlap);
-            Box::new(move || Upscaler::open(&aji_dir, backend, id, cache_dir, dirs, overlap)) as run::OpenUpscaler
+            let (aji_dir, cache_dir, dirs, backend, overlap, even) =
+                (plan.aji_dir.clone(), plan.cache_dir.clone(), plan.models_dirs.clone(), plan.backend, plan.overlap, plan.even_tiles);
+            Box::new(move || Upscaler::open(&aji_dir, backend, id, cache_dir, dirs, overlap, even)) as run::OpenUpscaler
         })
         .collect();
     let start = Instant::now();
@@ -784,7 +793,7 @@ fn bench(flags: Flags) -> Result<i32, String> {
     let iters = flags.iters.unwrap_or(10).max(1);
 
     progress::set_human(true, None);
-    let mut up = Upscaler::open(&aji_dir, backend, id, flags.cache_dir.clone(), models_dirs(&flags, None, &aji_dir), flags.overlap)?;
+    let mut up = Upscaler::open(&aji_dir, backend, id, flags.cache_dir.clone(), models_dirs(&flags, None, &aji_dir), flags.overlap, flags.even_tiles.unwrap_or(false))?;
     let path = up.resolve(&model).ok_or_else(|| format!("model not found: {model}"))?;
     progress::info(&format!("{} on {}: {w}x{h} {}, tile {tile}", path.file_name().unwrap_or_default().to_string_lossy(), up.description, if flags.gray { "gray" } else { "RGB" }));
 

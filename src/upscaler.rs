@@ -75,8 +75,10 @@ pub struct Upscaler {
     fallback: Option<Fallback>,
     model_dirs: Vec<PathBuf>,
     models: HashMap<(PathBuf, u32), Model>,
-    /// Input-pixel tile overlap; `None` = libaji's default (32).
+    /// Input-pixel tile overlap; `None` = libaji's default (128 since its seam fix).
     overlap: Option<u32>,
+    /// Split images into even tiles from a shape-range engine (`LoadParams::even_tiles`).
+    even_tiles: bool,
     pub description: String,
 }
 
@@ -95,6 +97,7 @@ impl Upscaler {
         cache_dir: Option<PathBuf>,
         model_dirs: Vec<PathBuf>,
         overlap: Option<u32>,
+        even_tiles: bool,
     ) -> Result<Self, String> {
         let aji = Aji::load(aji_dir)?;
         let trtexec_env = trtexec(aji_dir);
@@ -131,6 +134,7 @@ impl Upscaler {
                         model_dirs,
                         models: HashMap::new(),
                         overlap,
+                        even_tiles,
                         description,
                     });
                 }
@@ -162,7 +166,7 @@ impl Upscaler {
                 }
             }
             let _loading = LOAD_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-            let model = match load_model(&self.ctx, self.backend, path, tile, self.overlap, &name) {
+            let model = match load_model(&self.ctx, self.backend, path, tile, self.overlap, self.even_tiles, &name) {
                 Ok(m) => m,
                 Err(e) => {
                     let Some(fb) = self.fallback.as_mut() else {
@@ -170,7 +174,7 @@ impl Upscaler {
                     };
                     progress::backend_fallback(Some(&name), &e);
                     let ctx = fb.context()?;
-                    load_model(&ctx, Backend::TensorRt, path, tile, self.overlap, &name).map_err(|e| format!("{name}: {e}"))?
+                    load_model(&ctx, Backend::TensorRt, path, tile, self.overlap, self.even_tiles, &name).map_err(|e| format!("{name}: {e}"))?
                 }
             };
             self.models.insert(key.clone(), model);
@@ -328,8 +332,8 @@ fn open_context(aji: &Aji, backend: Backend, device_id: u64, cache_dir: &Option<
 }
 
 /// Load `path` at `tile` on `ctx`, waiting out a background engine build (reported on stdout).
-fn load_model(ctx: &Context, backend: Backend, path: &Path, tile: u32, overlap: Option<u32>, name: &str) -> Result<Model, String> {
-    let model = ctx.load_model(&LoadParams { onnx: path, tile: Some((tile, tile)), overlap, async_build: true })?;
+fn load_model(ctx: &Context, backend: Backend, path: &Path, tile: u32, overlap: Option<u32>, even_tiles: bool, name: &str) -> Result<Model, String> {
+    let model = ctx.load_model(&LoadParams { onnx: path, tile: Some((tile, tile)), overlap, async_build: true, even_tiles })?;
     if model.state() == ModelState::Building {
         progress::engine_build(name, tile, backend.label());
         while model.state() == ModelState::Building {

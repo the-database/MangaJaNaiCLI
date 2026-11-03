@@ -91,13 +91,21 @@ mangajanai bench 2x_model.onnx --tile 512 --iters 20
 
 ### Speed
 
-- **`--streams 2`** runs two inference threads per GPU, so one image's tile copies and blending overlap
-  the other's inference. On an RTX 5090 that was ~45% faster with a light model (SPAN_S) and ~20%
-  with FDAT_M, for about twice the VRAM.
+- **`--even-tiles`** (`[gpu] even_tiles = yes`), TensorRT: fixed tiles are pushed flush against a
+  page's edges and often re-infer most of their area. With even tiles, each page is split into
+  tiles of at most `--tile` from one engine that takes any tile shape. With MangaJaNai ESRGAN 4x
+  on 24 pages (RTX 5090) the time in inference went from 19.3 s to 15.0 s at `--tile 512`, and
+  to 11.8 s at `--tile 1024`, which needs ~2.5x the VRAM. It's off by default: it's only been
+  measured on one GPU, and on TensorRT-RTX the shape-range engine runs ~30% slower per pixel.
 - **TensorRT-RTX** (`--backend tensorrt-rtx`, Windows, RTX 20 series and newer) builds engines in
-  seconds instead of minutes and ran ~15% faster than TensorRT on an RTX 5090. A model that fails on
+  seconds instead of minutes. Its speed relative to TensorRT depends on the model: on an RTX 5090
+  it was ~25% faster with MangaJaNai ESRGAN and about the same with FDAT_M. A model that fails on
   it falls back to TensorRT. Auto is TensorRT, then DirectML.
 - **Tile size** is one engine per size. 512 is a good default; larger tiles help light models.
+  Tiles overlap by 128 px and blend only at the centre of the overlap, which keeps generated
+  screentone seamless; a smaller `--overlap` is faster but can show seams.
+- **`--streams 2`** runs two inference threads per GPU. With current libaji, tiling runs on the GPU,
+  so this rarely helps any more. It doubles VRAM.
 
 ## From the Python MangaJaNaiTRT
 

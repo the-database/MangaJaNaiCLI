@@ -76,11 +76,15 @@ fit =
 backend = auto
 ; first, all, or GPU numbers from `mangajanai devices`, like 0,1
 devices = first
-; Inference threads per GPU. 2 keeps the GPU busier (about 20-45% faster) but needs about twice the VRAM.
+; Inference threads per GPU. With libaji's GPU tiling 2 rarely helps, and it needs twice the VRAM.
 streams = 1
-; Tile size in pixels (one engine is built per model and tile size) and the overlap between tiles.
+; Tile size in pixels (one engine is built per model and tile size), and the minimum overlap
+; between tiles (empty = libaji's default, 128: smaller can show seams in generated screentone).
 tile = 512
-overlap = 32
+overlap =
+; TensorRT: split each page into even tiles of at most `tile` from one engine for all tile
+; shapes (yes or no). Fewer pixels inferred and usually faster; slower on TensorRT-RTX.
+even_tiles = no
 ; Where built engines are kept (empty = next to each model).
 engine_folder =
 ; Where aji.dll / libaji.so is (empty = next to the program, else an installed MangaJaNai GUI's).
@@ -145,6 +149,7 @@ pub struct Gpu {
     pub streams: Option<u32>,
     pub tile: Option<u32>,
     pub overlap: Option<u32>,
+    pub even_tiles: Option<bool>,
     pub cache_dir: Option<String>,
     pub aji_dir: Option<String>,
 }
@@ -391,10 +396,11 @@ impl File {
                     f.gpu.devices = r.string("devices")?.map(|d| d.split([',', ' ', ';']).filter(|s| !s.is_empty()).collect::<Vec<_>>().join(","));
                     f.gpu.streams = r.number("streams", "a number like 1 or 2")?;
                     f.gpu.tile = r.number("tile", "a number of pixels like 512")?;
-                    f.gpu.overlap = r.number("overlap", "a number of pixels like 32")?;
+                    f.gpu.overlap = r.number("overlap", "a number of pixels like 128")?;
+                    f.gpu.even_tiles = r.switch("even_tiles")?;
                     f.gpu.cache_dir = r.string("engine_folder")?;
                     f.gpu.aji_dir = r.string("aji_folder")?;
-                    r.finish(&["backend", "devices", "streams", "tile", "overlap", "engine_folder", "aji_folder"])?;
+                    r.finish(&["backend", "devices", "streams", "tile", "overlap", "even_tiles", "engine_folder", "aji_folder"])?;
                 }
                 "rule" => {
                     let model = r.string("model")?.ok_or_else(|| format!("line {}: this [rule] needs a model = line", sec.line))?;

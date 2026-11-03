@@ -29,8 +29,8 @@ const RUNTIME_REPO: &str = "the-database/MangaJaNaiCLI";
 /// packs-<platform>.json, which pins every pack. Empty: this build has no published packs to use
 /// (development builds use `--mirror`).
 const RUNTIME_TAG: &str = "runtime-1";
-const RUNTIME_INDEX_SHA256_WINDOWS: &str = "";
-const RUNTIME_INDEX_SHA256_LINUX: &str = "";
+const RUNTIME_INDEX_SHA256_WINDOWS: &str = "25c350b9b507a69ed05a300f1d894d8c78e39160a23ff1b45b6a2348bdf60e26";
+const RUNTIME_INDEX_SHA256_LINUX: &str = "a00a6aa8b9ce794d2d6917bb4cea5bf6759583aa959442fa032d2ecda4b76e60";
 
 /// TensorRT-RTX: aji_trtrtx.dll + the TensorRT for RTX runtime, from the libaji release this
 /// program's archive bundles.

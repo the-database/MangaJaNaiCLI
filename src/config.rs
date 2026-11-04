@@ -76,7 +76,8 @@ fit =
 backend = auto
 ; first, all, or GPU numbers from `mangajanai devices`, like 0,1
 devices = first
-; Inference threads per GPU. With libaji's GPU tiling 2 rarely helps, and it needs twice the VRAM.
+; Inference threads per GPU. 2 needs twice the VRAM and rarely helps on TensorRT, which tiles on
+; the GPU. DirectML tiles on the CPU, so 2 may still help there.
 streams = 1
 ; Tile size in pixels (one engine is built per model and tile size), and the minimum overlap
 ; between tiles (empty = libaji's default, 128: smaller can show seams in generated screentone).

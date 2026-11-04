@@ -56,8 +56,8 @@ Saving:
 GPU:
   --backend <b>             auto (default) | tensorrt | directml | tensorrt-rtx
   --device <d>              first (default) | all | 0,1 (numbers from `{prog} devices`)
-  --streams <n>             inference threads per GPU (default 1; with libaji's GPU tiling,
-                            2 rarely helps, for about twice the VRAM)
+  --streams <n>             inference threads per GPU (default 1). 2 doubles VRAM; it rarely
+                            helps on TensorRT, which tiles on the GPU, but may on DirectML
   --tile <px>               tile size (default 512; one engine per model and tile)
   --overlap <px>            minimum tile overlap (default: libaji's, 128)
   --even-tiles              TensorRT: split each page into even tiles of at most --tile from
@@ -720,8 +720,10 @@ fn device_ids(aji_dir: &Path, backend: BackendChoice, spec: Option<&str>) -> Res
         } else {
             return Err(format!("--device: no GPU {n} (there are {}; see `devices`)", devices.len()));
         };
-        // A GPU listed twice gets two inference threads (two contexts): the CPU side of one
-        // image's tiles then overlaps the other's inference, which can help light models.
+        // A GPU listed twice gets two inference threads (two contexts), as `--streams` does.
+        // TensorRT and TensorRT-RTX tile on the GPU, so that rarely helps there any more; on
+        // DirectML, which tiles on the host, one image's tiling can still overlap the other's
+        // inference.
         ids.push(id);
     }
     if ids.is_empty() {

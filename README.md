@@ -142,16 +142,11 @@ The only C dependencies are libwebp and UnRAR, built from source by their crates
 needed). libaji is loaded at run time, so building needs no CUDA or TensorRT.
 
 ## Related projects
-
-MangaJaNaiCLI is part of the JaNai suite: see [animejan.ai](https://animejan.ai) for an overview of all
-the apps. For news, pre-release models and help, join the [JaNai Discord server](https://discord.gg/EeFfZUBvxj).
-
-- [MangaJaNai GUI](https://github.com/the-database/MangaJaNaiGUI): the same upscaling in a Windows app.
-- [MangaJaNai](https://github.com/the-database/MangaJaNai): the manga upscaling models.
-- [yosh](https://github.com/the-database/yosh): a fast manga, comic and image reader, with an optional
-  AI upscaling add-on. Its imaging core decodes and resizes for MangaJaNaiCLI.
-- [animejanai-inference](https://github.com/the-database/animejanai-inference): the GPU inference
-  engine (libaji) MangaJaNaiCLI upscales with.
+- [mpv-AnimeJaNai](https://github.com/the-database/mpv-AnimeJaNai): Real-time anime upscaling in mpv
+- [VideoJaNai](https://github.com/the-database/VideoJaNai): Upscale video files
+- [MangaJaNai GUI](https://github.com/the-database/MangaJaNaiGUI): Upscale manga and images
+- [yosh](https://github.com/the-database/yosh): Fast manga, comic and image reader
+- [traiNNer-redux](https://github.com/the-database/traiNNer-redux): Train your own upscaling models
 
 ## License
 

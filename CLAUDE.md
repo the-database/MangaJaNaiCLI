@@ -72,6 +72,12 @@ To change a TensorRT/ORT/DirectML version:
 
 `--mirror <folder>` installs from local archives, for testing before anything is published.
 
+**yosh installs its AI add-on with this program**: it downloads `mangajanai-windows-x64.zip` /
+`mangajanai-linux-x64.tar.zst` from a release it pins (by SHA-256) into its add-on folder and runs
+`mangajanai setup --progress lines` there, reading the `SETUP_*` stdout lines (`setup.rs`, `Lines`).
+Those archives' layout (libaji at the root) and that protocol are a contract too: extend it, don't
+change a line.
+
 Releases before the move (0.1.x) are on the-database/yosh under `mangajanai-cli-v*` tags.
 
 ## Conventions

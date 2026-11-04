@@ -2,12 +2,12 @@
 
 Batch image and manga upscaling from the command line, with ONNX models on TensorRT (also DirectML
 and TensorRT-RTX on Windows). The command-line counterpart of
-[MangaJaNai GUI](https://github.com/the-database/MangaJaNaiConverterGui) and the successor to the
+[MangaJaNai GUI](https://github.com/the-database/MangaJaNaiGUI) and the successor to the
 Python [MangaJaNaiTRT](https://github.com/the-database/MangaJaNaiTRT). It's built from the same
 parts as the GUI: [yosh](https://github.com/the-database/yosh)'s imaging core for decoding,
 archives, grayscale detection and screentone-safe resizing, and
 [libaji](https://github.com/the-database/animejanai-inference) for inference. Models:
-[MangaJaNai](https://github.com/the-database/mangajanai).
+[MangaJaNai](https://github.com/the-database/MangaJaNai).
 
 The command is `mangajanai`. The same program is MangaJaNai GUI's upscaling backend,
 `mangajanai_upscale`, which the GUI runs with `--settings`.
@@ -140,6 +140,18 @@ cargo test
 
 The only C dependencies are libwebp and UnRAR, built from source by their crates (a C/C++ compiler is
 needed). libaji is loaded at run time, so building needs no CUDA or TensorRT.
+
+## Related projects
+
+MangaJaNaiCLI is part of the JaNai suite: see [animejan.ai](https://animejan.ai) for an overview of all
+the apps. For news, pre-release models and help, join the [JaNai Discord server](https://discord.gg/EeFfZUBvxj).
+
+- [MangaJaNai GUI](https://github.com/the-database/MangaJaNaiGUI): the same upscaling in a Windows app.
+- [MangaJaNai](https://github.com/the-database/MangaJaNai): the manga upscaling models.
+- [yosh](https://github.com/the-database/yosh): a fast manga, comic and image reader, with an optional
+  AI upscaling add-on. Its imaging core decodes and resizes for MangaJaNaiCLI.
+- [animejanai-inference](https://github.com/the-database/animejanai-inference): the GPU inference
+  engine (libaji) MangaJaNaiCLI upscales with.
 
 ## License
 

@@ -24,6 +24,7 @@ Usage:
   {prog} bench <model.onnx> [options]   time a model on a synthetic image
   {prog} setup [--no-models] [--check]  download what this PC needs to upscale (the GPU runtime and
                                         the models), next to the program; run it again to update
+                                        (--progress lines: also report on stdout for programs)
 
 With no inputs on the command line, `input` from the settings file is used. The settings file is
 -c <file>, else {CONFIG_NAME} in the current folder, else next to the program; flags override it.
@@ -279,7 +280,12 @@ fn dispatch(mut args: Vec<String>) -> Result<i32, String> {
     match sub.as_deref() {
         Some("init") => return init(&flags),
         Some("setup") => {
-            return crate::setup::run(&crate::setup::Options { no_models: flags.no_models, check: flags.check, mirror: flags.mirror.clone() });
+            return crate::setup::run(&crate::setup::Options {
+                no_models: flags.no_models,
+                check: flags.check,
+                mirror: flags.mirror.clone(),
+                lines: flags.lines,
+            });
         }
         Some("devices") => return devices(&flags),
         Some("bench") => return bench(flags),
@@ -750,7 +756,7 @@ fn ensure_runtime(aji_dir: &Path) -> Result<bool, String> {
     let mut answer = String::new();
     let _ = std::io::stdin().lock().read_line(&mut answer);
     if matches!(answer.trim().to_ascii_lowercase().as_str(), "" | "y" | "yes") {
-        Ok(crate::setup::run(&crate::setup::Options { no_models: false, check: false, mirror: None })? == 0)
+        Ok(crate::setup::run(&crate::setup::Options { no_models: false, check: false, mirror: None, lines: false })? == 0)
     } else {
         Ok(false)
     }

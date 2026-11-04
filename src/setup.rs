@@ -58,6 +58,32 @@ pub struct Options {
     /// A folder holding the archives by asset name (and the runtime packs-<platform>.json), used
     /// instead of downloading; the index isn't pin-checked, the archives still are.
     pub mirror: Option<PathBuf>,
+    /// `--progress lines`: also report on stdout in lines another program can read (yosh installs
+    /// its AI add-on this way). See [`Lines`].
+    pub lines: bool,
+}
+
+/// The stdout line protocol of `setup --progress lines`, one event per line, fields separated by
+/// single spaces (a component name never contains one):
+///
+/// - `SETUP_PLAN <name> <bytes> installed|download`: each component this machine needs.
+/// - `SETUP_TOTAL <bytes>`: what will be downloaded (0: everything is installed).
+/// - `SETUP_DOWNLOAD <name> <got> <total>`: download progress, at most once per percent.
+/// - `SETUP_EXTRACT <name>`: the component's archive is being unpacked.
+/// - `SETUP_DONE`: finished, nothing left to do (not printed after `--check` with work left).
+///
+/// A failure ends the run without `SETUP_DONE`: the message is on stderr (`error: ...`) and the exit
+/// code isn't 0. The human output on stderr is unchanged, apart from the download percentages.
+struct Lines(bool);
+
+impl Lines {
+    fn say(&self, s: std::fmt::Arguments) {
+        if self.0 {
+            let mut out = std::io::stdout().lock();
+            let _ = writeln!(out, "{s}");
+            let _ = out.flush();
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -150,8 +176,8 @@ fn sha256_bytes(b: &[u8]) -> String {
     format!("{:x}", Sha256::digest(b))
 }
 
-/// Download `url` to `dest`, showing progress on stderr.
-fn download(url: &str, dest: &Path, label: &str, expected: u64) -> Result<(), String> {
+/// Download `url` to `dest`, showing progress on stderr (and as `SETUP_DOWNLOAD` lines).
+fn download(url: &str, dest: &Path, label: &str, expected: u64, lines: &Lines) -> Result<(), String> {
     let resp = ureq::get(url).call().map_err(|e| format!("downloading {url}: {e}"))?;
     let total = resp
         .headers()
@@ -163,7 +189,8 @@ fn download(url: &str, dest: &Path, label: &str, expected: u64) -> Result<(), St
     let part = dest.with_extension("part");
     let mut out = std::io::BufWriter::new(std::fs::File::create(&part).map_err(|e| format!("{}: {e}", part.display()))?);
     let tty = std::io::stderr().is_terminal();
-    let (mut got, mut shown) = (0u64, u64::MAX);
+    let (mut got, mut shown, mut said) = (0u64, u64::MAX, u64::MAX);
+    lines.say(format_args!("SETUP_DOWNLOAD {label} 0 {total}"));
     let mut buf = vec![0u8; 1 << 20];
     loop {
         let n = reader.read(&mut buf).map_err(|e| format!("downloading {url}: {e}"))?;
@@ -175,6 +202,10 @@ fn download(url: &str, dest: &Path, label: &str, expected: u64) -> Result<(), St
         if total > 0 {
             let t = total;
             let pct = got * 100 / t;
+            if pct != said {
+                said = pct;
+                lines.say(format_args!("SETUP_DOWNLOAD {label} {got} {t}"));
+            }
             let step = if tty { pct } else { pct / 25 * 25 };
             if step != shown {
                 shown = step;
@@ -344,6 +375,7 @@ fn rel_path(c: &Component, f: &str) -> String {
 /// Run setup. Returns the exit code.
 pub fn run(opts: &Options) -> Result<i32, String> {
     let dir = install_dir();
+    let lines = Lines(opts.lines);
     let gpus = nvml::gpus();
     if gpus.is_empty() {
         eprintln!("GPU: no NVIDIA GPU found{}", if cfg!(windows) { "; using DirectML (AMD/Intel/other GPUs)" } else { "" });
@@ -367,10 +399,13 @@ pub fn run(opts: &Options) -> Result<i32, String> {
             total += c.bytes;
         }
         eprintln!("  {:<32} {:<26} {:>8}  {}", c.name, c.version, mb(c.bytes), if todo { "to download" } else { "installed" });
+        lines.say(format_args!("SETUP_PLAN {} {} {}", c.name, c.bytes, if todo { "download" } else { "installed" }));
     }
+    lines.say(format_args!("SETUP_TOTAL {total}"));
     let todo: Vec<&Component> = wanted.iter().filter(|c| needed(c, &state)).collect();
     if todo.is_empty() {
         eprintln!("\nEverything is installed.");
+        lines.say(format_args!("SETUP_DONE"));
         return Ok(0);
     }
     eprintln!("\nTo download: {}", mb(total));
@@ -390,8 +425,9 @@ pub fn run(opts: &Options) -> Result<i32, String> {
                 Some(m) => {
                     eprintln!("  {}: copying from {}", c.name, m.display());
                     std::fs::copy(m.join(&c.asset), &archive).map_err(|e| format!("{}: {e}", m.join(&c.asset).display()))?;
+                    lines.say(format_args!("SETUP_DOWNLOAD {} {} {}", c.name, c.bytes, c.bytes));
                 }
-                None => download(&c.url, &archive, &c.name, c.bytes)?,
+                None => download(&c.url, &archive, &c.name, c.bytes, &lines)?,
             }
             let got = sha256_file(&archive)?;
             if got != c.sha256 {
@@ -400,6 +436,7 @@ pub fn run(opts: &Options) -> Result<i32, String> {
             }
         }
         eprintln!("  {}: extracting", c.name);
+        lines.say(format_args!("SETUP_EXTRACT {}", c.name));
         let dest = if c.models { dir.join("models") } else { dir.clone() };
         let files: Vec<String> = extract(&archive, c.format, &dest)?.iter().map(|f| rel_path(c, f)).collect();
         // Files the previous version of this component had and the new one doesn't.
@@ -414,5 +451,6 @@ pub fn run(opts: &Options) -> Result<i32, String> {
     }
     let _ = std::fs::remove_dir(&dl);
     eprintln!("\nSetup complete. Try: mangajanai devices, then mangajanai init");
+    lines.say(format_args!("SETUP_DONE"));
     Ok(0)
 }

@@ -2,12 +2,12 @@
 
 Batch image and manga upscaling from the command line, with ONNX models on TensorRT (also DirectML
 and TensorRT-RTX on Windows). The command-line counterpart of
-[MangaJaNai GUI](https://github.com/the-database/MangaJaNaiConverterGui) and the successor to the
+[MangaJaNai GUI](https://github.com/the-database/MangaJaNaiGUI) and the successor to the
 Python [MangaJaNaiTRT](https://github.com/the-database/MangaJaNaiTRT). It's built from the same
 parts as the GUI: [yosh](https://github.com/the-database/yosh)'s imaging core for decoding,
 archives, grayscale detection and screentone-safe resizing, and
 [libaji](https://github.com/the-database/animejanai-inference) for inference. Models:
-[MangaJaNai](https://github.com/the-database/mangajanai).
+[MangaJaNai](https://github.com/the-database/MangaJaNai).
 
 The command is `mangajanai`. The same program is MangaJaNai GUI's upscaling backend,
 `mangajanai_upscale`, which the GUI runs with `--settings`.
@@ -140,6 +140,13 @@ cargo test
 
 The only C dependencies are libwebp and UnRAR, built from source by their crates (a C/C++ compiler is
 needed). libaji is loaded at run time, so building needs no CUDA or TensorRT.
+
+## Related projects
+- [mpv-AnimeJaNai](https://github.com/the-database/mpv-AnimeJaNai): Real-time anime upscaling in mpv
+- [VideoJaNai](https://github.com/the-database/VideoJaNai): Upscale video files
+- [MangaJaNai GUI](https://github.com/the-database/MangaJaNaiGUI): Upscale manga and images
+- [yosh](https://github.com/the-database/yosh): Fast manga, comic and image reader
+- [traiNNer-redux](https://github.com/the-database/traiNNer-redux): Train your own upscaling models
 
 ## License
 

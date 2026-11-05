@@ -67,3 +67,12 @@ jobs:
           packs-<platform>.json lists each pack's version, SHA-256, size and files. TensorRT is NVIDIA proprietary software, redistributed under its license; NVIDIA's and Microsoft's notices ship in the packs.
           NOTES
           fi
+
+      # bump-pins.yml opens the PR that pins the new tag and index SHA-256s in src/setup.rs.
+      - name: Request the RUNTIME_TAG bump PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag=$(python3 scripts/runtime_packs.py --print-tag)
+          gh api "repos/$GITHUB_REPOSITORY/dispatches" -f event_type=upstream-release \
+            -f "client_payload[source]=runtime-packs" -f "client_payload[tag]=$tag"

@@ -1,0 +1,22 @@
+# Dependabot: monthly, grouped, to keep the noise down. The pins Dependabot can't see (upstream
+# release tags and asset SHA-256s) are bumped by bump-pins.yml instead.
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: monthly
+    ignore:
+      # A git pin on a yosh commit; bump-pins.yml (yosh-image) moves it.
+      - dependency-name: yosh-image
+    groups:
+      cargo:
+        patterns: ["*"]
+        update-types: [minor, patch]
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    groups:
+      actions:
+        patterns: ["*"]

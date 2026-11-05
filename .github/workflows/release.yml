@@ -16,10 +16,6 @@ on:
 permissions:
   contents: write
 
-env:
-  # The libaji release the Linux bundle carries (its aji-linux-x64.tar.zst).
-  AJI_VERSION: v0.21.0
-
 jobs:
   build:
     runs-on: windows-latest
@@ -34,6 +30,15 @@ jobs:
           tag_ver="${GITHUB_REF_NAME#v}"
           echo "Cargo.toml=$cargo_ver  tag=$tag_ver"
           [ "$cargo_ver" = "$tag_ver" ] || { echo "::error::tag $GITHUB_REF_NAME does not match Cargo.toml version $cargo_ver — bump Cargo.toml"; exit 1; }
+
+      # The libaji release both archives bundle: src/setup.rs's AJI_VERSION (which `mangajanai setup`
+      # also fetches TensorRT-RTX from), so the pin lives in one place and bump_pins.py updates it.
+      - name: Read the libaji pin
+        shell: bash
+        run: |
+          v=$(sed -nE 's/^const AJI_VERSION: &str = "(v[0-9.]+)";.*/\1/p' src/setup.rs)
+          [ -n "$v" ] || { echo "::error::no AJI_VERSION in src/setup.rs"; exit 1; }
+          echo "AJI_VERSION=$v" >> "$GITHUB_ENV"
 
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
@@ -156,6 +161,15 @@ jobs:
           tag_ver="${GITHUB_REF_NAME#v}"
           [ "$cargo_ver" = "$tag_ver" ] || { echo "::error::tag $GITHUB_REF_NAME does not match Cargo.toml version $cargo_ver"; exit 1; }
 
+      # The libaji release both archives bundle: src/setup.rs's AJI_VERSION (which `mangajanai setup`
+      # also fetches TensorRT-RTX from), so the pin lives in one place and bump_pins.py updates it.
+      - name: Read the libaji pin
+        shell: bash
+        run: |
+          v=$(sed -nE 's/^const AJI_VERSION: &str = "(v[0-9.]+)";.*/\1/p' src/setup.rs)
+          [ -n "$v" ] || { echo "::error::no AJI_VERSION in src/setup.rs"; exit 1; }
+          echo "AJI_VERSION=$v" >> "$GITHUB_ENV"
+
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
@@ -206,3 +220,12 @@ jobs:
         uses: softprops/action-gh-release@v3
         with:
           files: mangajanai-linux-x64.tar.zst
+
+  # yosh and MangaJaNai GUI open PRs that pin the new release (their bump-pins.yml).
+  notify-downstream:
+    needs: linux
+    if: startsWith(github.ref, 'refs/tags/v')
+    uses: ./.github/workflows/notify-downstream.yml
+    with:
+      tag: ${{ github.ref_name }}
+    secrets: inherit

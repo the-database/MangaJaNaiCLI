@@ -30,11 +30,13 @@ parallel finish (final resize, encode; `encode.rs`) → writes in input order.
 - **yosh-image** is a git dependency pinned to a commit of
   [the-database/yosh](https://github.com/the-database/yosh). It provides decoders, archives,
   screentone-safe resizing and the runtime-loaded libaji bindings (`yosh_image::aji`). A change there
-  is a yosh PR first, then a bump of `rev` in `Cargo.toml`.
+  is a yosh PR first, then a bump of `rev` in `Cargo.toml`: `bump-pins.yml` (`yosh-image`) opens
+  that PR after a yosh release, or by hand for any yosh ref.
 - **libaji** ([animejanai-inference](https://github.com/the-database/animejanai-inference),
   `include/aji_image.h`) is loaded at run time from `--aji-dir`. The default is next to the
   program, else (command line, Windows) an installed MangaJaNai GUI's `inference` folder.
-  `AJI_VERSION` in the release workflow pins the libaji that the Linux bundle carries.
+  `AJI_VERSION` in `src/setup.rs` pins the libaji release: both archives bundle it (the release
+  workflow reads it from there) and `setup` fetches TensorRT-RTX from it.
 
 ## Commands
 
@@ -68,7 +70,7 @@ To change a TensorRT/ORT/DirectML version:
 
 1. Bump `TAG` and the pins in `runtime_packs.py`.
 2. Run the workflow.
-3. Update `RUNTIME_TAG` and the index hashes.
+3. Merge the PR it asks `bump-pins.yml` for, which updates `RUNTIME_TAG` and the index hashes.
 
 `--mirror <folder>` installs from local archives, for testing before anything is published.
 
@@ -79,6 +81,15 @@ Those archives' layout (libaji at the root) and that protocol are a contract too
 change a line.
 
 Releases before the move (0.1.x) are on the-database/yosh under `mangajanai-cli-v*` tags.
+
+### Bump PRs
+
+A `v*` release asks yosh and MangaJaNai GUI to open PRs that pin it (`notify-downstream.yml`).
+Here, `bump-pins.yml` runs `scripts/bump_pins.py <source> <tag>` and opens a PR on `bump/<source>`
+for a libaji release (`libaji`, sent by animejanai-inference), the runtime packs
+(`runtime-packs`) and yosh-image (`yosh-image`, sent by a yosh release). The script downloads each
+pinned asset for its SHA-256; run it locally to check a bump. Both workflows need the
+`JANAI_BUMP_TOKEN` secret.
 
 ## Conventions
 

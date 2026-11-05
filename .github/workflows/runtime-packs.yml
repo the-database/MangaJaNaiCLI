@@ -16,13 +16,13 @@ jobs:
   windows:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
       - name: Build packs
         run: python scripts/runtime_packs.py --platform windows --out packs --work ${{ runner.temp }}/runtime-work --sevenzip "C:\Program Files\7-Zip\7z.exe"
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@v7
         with:
           name: runtime-packs-windows
           path: packs/*
@@ -30,12 +30,12 @@ jobs:
   linux:
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - name: Install 7-Zip
         run: sudo apt-get update && sudo apt-get install -y p7zip-full
       - name: Build packs
         run: python3 scripts/runtime_packs.py --platform linux --out packs --work ${{ runner.temp }}/runtime-work
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@v7
         with:
           name: runtime-packs-linux
           path: packs/*
@@ -44,8 +44,8 @@ jobs:
     needs: [windows, linux]
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/download-artifact@v6
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
         with:
           path: packs
           merge-multiple: true

@@ -25,6 +25,9 @@ Usage:
   {prog} setup [--no-models] [--check]  download what this PC needs to upscale (the GPU runtime and
                                         the models), next to the program; run it again to update
                                         (--progress lines: also report on stdout for programs)
+                                        --store --app-id ID --app-path EXE: an app's install,
+                                        sharing TensorRT and the models with other apps through
+                                        the per-user pack store; --remove: drop it from the store
 
 With no inputs on the command line, `input` from the settings file is used. The settings file is
 -c <file>, else {CONFIG_NAME} in the current folder, else next to the program; flags override it.
@@ -64,7 +67,8 @@ GPU:
   --even-tiles              TensorRT: split each page into even tiles of at most --tile from
                             one engine for all tile shapes: fewer pixels inferred, often
                             faster (slower per pixel on TensorRT-RTX)
-  --cache-dir <dir>         TensorRT engine cache (default: next to each model)
+  --cache-dir <dir>         TensorRT engine cache (default: next to each model; cache/ next to
+                            the program in a pack store install)
   --aji-dir <dir>           where aji.dll / libaji.so is (default: next to the program, else an
                             installed MangaJaNai GUI's inference folder)
 
@@ -105,6 +109,12 @@ fn default_aji_dir() -> PathBuf {
         }
     }
     exe
+}
+
+/// The engine cache when none is given: next to each model, except in a pack store install, whose
+/// model packs are read-only: then `cache/` next to the program.
+fn default_cache_dir(given: Option<PathBuf>) -> Option<PathBuf> {
+    given.or_else(|| crate::setup::store_mode(&exe_dir()).map(|_| exe_dir().join("cache")))
 }
 
 fn prog_name() -> String {
@@ -160,6 +170,10 @@ struct Flags {
     no_models: bool,
     check: bool,
     mirror: Option<PathBuf>,
+    store: bool,
+    app_id: Option<String>,
+    app_path: Option<PathBuf>,
+    remove: bool,
 }
 
 fn num<T: std::str::FromStr>(name: &str, v: &str) -> Result<T, String> {
@@ -241,6 +255,10 @@ fn parse_flags(args: Vec<String>) -> Result<Flags, String> {
             "--no-models" => f.no_models = true,
             "--check" => f.check = true,
             "--mirror" => f.mirror = Some(value(&key)?.into()),
+            "--store" => f.store = true,
+            "--app-id" => f.app_id = Some(value(&key)?),
+            "--app-path" => f.app_path = Some(value(&key)?.into()),
+            "--remove" => f.remove = true,
             "-V" | "--version" => {
                 println!("{} {}", prog_name(), env!("CARGO_PKG_VERSION"));
                 std::process::exit(0);
@@ -280,11 +298,18 @@ fn dispatch(mut args: Vec<String>) -> Result<i32, String> {
     match sub.as_deref() {
         Some("init") => return init(&flags),
         Some("setup") => {
+            let store = match (flags.store, &flags.app_id, &flags.app_path) {
+                (false, None, None) => None,
+                (true, Some(id), Some(path)) => Some(crate::setup::StoreMode { app_id: id.clone(), app_path: path.clone() }),
+                _ => return Err("setup --store needs --app-id and --app-path (and they need --store)".into()),
+            };
             return crate::setup::run(&crate::setup::Options {
                 no_models: flags.no_models,
                 check: flags.check,
                 mirror: flags.mirror.clone(),
                 lines: flags.lines,
+                store,
+                remove: flags.remove,
             });
         }
         Some("devices") => return devices(&flags),
@@ -381,6 +406,7 @@ fn gui_run(flags: Flags) -> i32 {
         _ => run::Input::Folder { dir: wf.input_folder_path.clone().into(), images: wf.upscale_images, archives: wf.upscale_archives },
     };
     models_dirs.push(exe_dir().join("..").join("models"));
+    models_dirs.extend(crate::setup::store_model_dirs(&exe_dir()));
 
     let output = run::Output {
         dir: wf.output_folder_path.clone().into(),
@@ -398,7 +424,7 @@ fn gui_run(flags: Flags) -> i32 {
 
     let start = Instant::now();
     let backend = flags.backend.unwrap_or(BackendChoice::Auto);
-    let (aji_dir, cache_dir) = (flags.aji_dir.clone().unwrap_or_else(exe_dir), flags.cache_dir.clone());
+    let (aji_dir, cache_dir) = (flags.aji_dir.clone().unwrap_or_else(exe_dir), default_cache_dir(flags.cache_dir.clone()));
     let open: run::OpenUpscaler = Box::new(move || Upscaler::open(&aji_dir, backend, device, cache_dir, models_dirs, None, false));
     run::run(vec![input], output, job, vec![open]);
     progress::finish(start.elapsed());
@@ -452,6 +478,8 @@ fn models_dirs(flags: &Flags, file: Option<(&Path, &File)>, aji_dir: &Path) -> V
         dirs.push(d.join("models"));
         dirs.push(d.join("..").join("models"));
     }
+    // an app's install: the model packs its ref lists in the shared pack store
+    dirs.extend(crate::setup::store_model_dirs(&exe_dir()));
     if cfg!(windows) {
         for (var, sub) in [("APPDATA", r"MangaJaNaiConverterGui\models"), ("LOCALAPPDATA", r"Programs\MangaJaNaiConverterGui\models")] {
             if let Some(root) = std::env::var_os(var) {
@@ -692,7 +720,7 @@ fn resolve(flags: &Flags) -> Result<Plan, String> {
         streams: flags.streams.or(file.and_then(|f| f.gpu.streams)).unwrap_or(1).clamp(1, 8),
         overlap: flags.overlap.or(file.and_then(|f| f.gpu.overlap)),
         even_tiles: flags.even_tiles.or(file.and_then(|f| f.gpu.even_tiles)).unwrap_or(false),
-        cache_dir: flags.cache_dir.clone().or(file.and_then(|f| f.gpu.cache_dir.as_deref().map(|c| config::rel(&base, c)))),
+        cache_dir: default_cache_dir(flags.cache_dir.clone().or(file.and_then(|f| f.gpu.cache_dir.as_deref().map(|c| config::rel(&base, c))))),
         models_dirs: models_dirs(flags, file.map(|f| (base.as_path(), f)), &aji_dir),
         aji_dir,
         describe,
@@ -756,7 +784,7 @@ fn ensure_runtime(aji_dir: &Path) -> Result<bool, String> {
     let mut answer = String::new();
     let _ = std::io::stdin().lock().read_line(&mut answer);
     if matches!(answer.trim().to_ascii_lowercase().as_str(), "" | "y" | "yes") {
-        Ok(crate::setup::run(&crate::setup::Options { no_models: false, check: false, mirror: None, lines: false })? == 0)
+        Ok(crate::setup::run(&crate::setup::Options::private(false))? == 0)
     } else {
         Ok(false)
     }
@@ -842,7 +870,7 @@ fn bench(flags: Flags) -> Result<i32, String> {
     let iters = flags.iters.unwrap_or(10).max(1);
 
     progress::set_human(true, None);
-    let mut up = Upscaler::open(&aji_dir, backend, id, flags.cache_dir.clone(), models_dirs(&flags, None, &aji_dir), flags.overlap, flags.even_tiles.unwrap_or(false))?;
+    let mut up = Upscaler::open(&aji_dir, backend, id, default_cache_dir(flags.cache_dir.clone()), models_dirs(&flags, None, &aji_dir), flags.overlap, flags.even_tiles.unwrap_or(false))?;
     let path = up.resolve(&model).ok_or_else(|| format!("model not found: {model}"))?;
     progress::info(&format!("{} on {}: {w}x{h} {}, tile {tile}", path.file_name().unwrap_or_default().to_string_lossy(), up.description, if flags.gray { "gray" } else { "RGB" }));
 

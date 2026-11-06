@@ -4,8 +4,8 @@
 Sources:
   libaji         the-database/animejanai-inference release: AJI_VERSION and the TensorRT-RTX
                  asset's SHA-256/size in src/setup.rs (the release workflow reads AJI_VERSION too)
-  runtime-packs  this repo's runtime-<n> release: RUNTIME_TAG and both packs-<platform>.json
-                 SHA-256s in src/setup.rs
+  runtime-packs  the shared runtime packs, a the-database/animejanai-inference runtime-<n> release:
+                 RUNTIME_TAG and both packs-<platform>.json SHA-256s in src/setup.rs
   yosh-image     a the-database/yosh ref (a release tag, a branch or a commit): the yosh-image
                  `rev` in Cargo.toml, and Cargo.lock (needs cargo). Skipped when nothing under
                  crates/yosh-image/ or the workspace Cargo.toml changed.
@@ -208,14 +208,17 @@ def bump_runtime(tag, changes, allow_downgrade):
         raise Fail(f"{tag} isn't a runtime-<n> tag")
     f = File("src/setup.rs", changes)
     guard_downgrade("RUNTIME_TAG", f.get("RUNTIME_TAG", RUNTIME_TAG), tag, allow_downgrade)
-    rel = release("the-database/MangaJaNaiCLI", tag)
+    rel = release(AJI_REPO, tag)
     f.set("RUNTIME_TAG", RUNTIME_TAG, tag)
     for plat, const in (("windows", "RUNTIME_INDEX_SHA256_WINDOWS"), ("linux", "RUNTIME_INDEX_SHA256_LINUX")):
         sha, _ = digest(asset(rel, f"packs-{plat}-x64.json"))
         f.set(const, rf'^const {const}: &str = "([0-9a-f]{{64}})";', sha)
     notes = (
-        f"Pins the runtime packs on [{tag}]({rel['html_url']}) (`runtime-packs.yml`). `mangajanai "
-        "setup` checks each `packs-<platform>.json` against these SHA-256s, and the index pins every pack."
+        f"Pins the shared runtime packs on [{tag}]({rel['html_url']}) (animejanai-inference "
+        "`runtime-packs.yml`). `mangajanai setup` checks each `packs-<platform>.json` against these "
+        "SHA-256s, and the index pins every pack. Portable installs keep files that didn't change; "
+        "`setup --store` installs the new versions into the pack store, and the old ones go once "
+        "no other app uses them."
     )
     return [f], f"Bump the runtime packs to {tag}", notes
 

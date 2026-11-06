@@ -46,7 +46,7 @@ name = "aji-runtime"
 version = "0.1.0"
 source = "git+https://github.com/the-database/aji-runtime?rev=252c1a65e165d9bedcbfe10d6893484eb73291ca#252c1a65e165d9bedcbfe10d6893484eb73291ca"
 dependencies = [
- "libloading 0.9.0",
+ "libloading",
  "serde",
  "serde_json",
  "sevenz-rust2",
@@ -1124,16 +1124,6 @@ dependencies = [
 
 [[package]]
 name = "libloading"
-version = "0.8.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d7c4b02199fee7c5d21a5ae7d8cfa79a6ef5bb2fc834d6e9058e89c825efdc55"
-dependencies = [
- "cfg-if",
- "windows-link",
-]
-
-[[package]]
-name = "libloading"
 version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "754ca22de805bb5744484a5b151a9e1a8e837d5dc232c2d7d8c2e3492edc8b60"
@@ -1195,7 +1185,7 @@ dependencies = [
  "aji-runtime",
  "embed-manifest",
  "jpeg-encoder",
- "libloading 0.9.0",
+ "libloading",
  "png",
  "ravif",
  "serde",
@@ -2435,7 +2425,7 @@ checksum = "7a5a4b21e1a62b67a2970e6831bc091d7b87e119e7f9791aef9702e3bef04448"
 [[package]]
 name = "yosh-image"
 version = "0.1.0"
-source = "git+https://github.com/the-database/yosh?rev=72b75ad23682b39ce2991ffc696a017fbdddbf24#72b75ad23682b39ce2991ffc696a017fbdddbf24"
+source = "git+https://github.com/the-database/yosh?rev=18128a677832e294b0ef4fbc20e23dee2294b659#18128a677832e294b0ef4fbc20e23dee2294b659"
 dependencies = [
  "chardetng",
  "encoding_rs",
@@ -2443,7 +2433,7 @@ dependencies = [
  "image",
  "jpeg-decoder",
  "jxl-oxide",
- "libloading 0.8.9",
+ "libloading",
  "natord",
  "png",
  "psd",

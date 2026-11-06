@@ -78,8 +78,8 @@ To change a TensorRT/ORT/DirectML version:
 add-on) shares TensorRT, its builder packs, TensorRT-RTX and the models with the other apps
 through the per-user pack store ([aji-runtime](https://github.com/the-database/aji-runtime),
 a library dependency). The packs come from the shared runtime release, animejanai-inference
-`runtime-<n>` (`STORE_TAG` and `STORE_INDEX_SHA256_*` in `setup.rs`; empty pins = not published,
-test with `--mirror` holding that release's assets and index). In store mode:
+`runtime-<n>` (`STORE_TAG` and `STORE_INDEX_SHA256_*` in `setup.rs`; test unpublished packs with
+`--mirror` holding that release's assets and index). In store mode:
 
 - Matching files already in the folder are adopted, then this folder's private copies are removed.
   libaji's files always stay.

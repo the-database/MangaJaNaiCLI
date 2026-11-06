@@ -45,10 +45,10 @@ const RUNTIME_INDEX_SHA256_LINUX: &str = "a00a6aa8b9ce794d2d6917bb4cea5bf6759583
 /// TensorRT-RTX: aji_trtrtx.dll + the TensorRT for RTX runtime, from the libaji release this
 /// program's archive bundles.
 const AJI_REPO: &str = "the-database/animejanai-inference";
-const AJI_VERSION: &str = "v0.21.0";
+const AJI_VERSION: &str = "v0.23.0";
 const TRTRTX_ASSET: &str = "aji-trtrtx-windows-x64.zip";
-const TRTRTX_SHA256: &str = "213204243f947affebbe32db99379a4fea74cc1ab50657370dfff26fb72df0de";
-const TRTRTX_BYTES: u64 = 95_346_023;
+const TRTRTX_SHA256: &str = "d974804c20afdd080ff2e1164477968f432d01cd9cd8886d23e484158ec6f179";
+const TRTRTX_BYTES: u64 = 95_346_418;
 
 /// The default models, the same archives (and SHA-256s) MangaJaNai GUI installs.
 const MODELS_REPO: &str = "the-database/MangaJaNai";
@@ -60,12 +60,12 @@ const MODELS: &[(&str, &str, &str, &str, u64)] = &[
 ];
 
 /// Store mode's runtime release: the shared runtime packs (animejanai-inference
-/// scripts/runtime_packs.py TAG) and the SHA-256 of each packs-<platform>.json. Empty: not
-/// published yet (test with `--mirror`).
+/// scripts/runtime_packs.py TAG) and the SHA-256 of each packs-<platform>.json, which pins every
+/// pack.
 const STORE_REPO: &str = "the-database/animejanai-inference";
 const STORE_TAG: &str = "runtime-2";
-const STORE_INDEX_SHA256_WINDOWS: &str = "";
-const STORE_INDEX_SHA256_LINUX: &str = "";
+const STORE_INDEX_SHA256_WINDOWS: &str = "5b6f0450ba4eed34d6e25dde072ce1298f083d91d142fd858495483e7711aea1";
+const STORE_INDEX_SHA256_LINUX: &str = "d441210f7747b255f17483f7c8b921817ad3f997abab5a1ba5d348b51511ab61";
 
 const STATE_FILE: &str = "setup.json";
 const DOWNLOAD_DIR: &str = ".setup-download";

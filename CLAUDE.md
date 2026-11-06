@@ -60,17 +60,20 @@ version. Assets:
 It picks the components from the GPUs it finds through NVML (`src/nvml.rs`):
 
 - The runtime packs: TensorRT's runtime, plus one builder-resource pack per GPU generation, and
-  ONNX Runtime + DirectML. They live on their own `runtime-<n>` release, published by
-  `.github/workflows/runtime-packs.yml` (`scripts/runtime_packs.py`), not on CLI releases.
-  `setup.rs` pins `RUNTIME_TAG` and the SHA-256 of each `packs-<platform>.json` index.
+  ONNX Runtime + DirectML. They live on the shared runtime release every libaji app pins,
+  animejanai-inference `runtime-<n>` (its `scripts/runtime_packs.py` and `runtime-packs.yml`; this
+  repo's own `runtime-1` was the CLI-only one before it). `setup.rs` pins `RUNTIME_REPO`,
+  `RUNTIME_TAG` and the SHA-256 of each `packs-<platform>.json` index, for both modes. A component
+  whose installed files are exactly a new release's isn't downloaded again (`refresh_unchanged`).
 - TensorRT-RTX, from the libaji release.
 - The models: the same archives MangaJaNai GUI installs.
 
 To change a TensorRT/ORT/DirectML version:
 
-1. Bump `TAG` and the pins in `runtime_packs.py`.
-2. Run the workflow.
-3. Merge the PR it asks `bump-pins.yml` for, which updates `RUNTIME_TAG` and the index hashes.
+1. Bump `TAG` and the pins in animejanai-inference `scripts/runtime_packs.py`.
+2. Run its `runtime-packs.yml`.
+3. Merge the PR it asks `bump-pins.yml` here for (`runtime-packs`), which updates `RUNTIME_TAG` and
+   the index hashes.
 
 `--mirror <folder>` installs from local archives, for testing before anything is published.
 
@@ -78,8 +81,8 @@ To change a TensorRT/ORT/DirectML version:
 add-on) shares TensorRT, its builder packs, TensorRT-RTX and the models with the other apps
 through the per-user pack store ([aji-runtime](https://github.com/the-database/aji-runtime),
 a library dependency). The packs come from the shared runtime release, animejanai-inference
-`runtime-<n>` (`STORE_TAG` and `STORE_INDEX_SHA256_*` in `setup.rs`; test unpublished packs with
-`--mirror` holding that release's assets and index). In store mode:
+`runtime-<n>` (the same `RUNTIME_*` pins; test unpublished packs with `--mirror` holding that
+release's assets and index). In store mode:
 
 - Matching files already in the folder are adopted, then this folder's private copies are removed.
   libaji's files always stay.

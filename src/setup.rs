@@ -8,9 +8,10 @@
 //! - Models: MangaJaNai and IllustrationJaNai, plus the DAT2/HAT variant this GPU runs best (bf16 on
 //!   NVIDIA compute capability 8.0+, fp32 otherwise).
 //!
-//! Sources, each checked against a SHA-256 compiled in here: the runtime packs from this repo's
-//! `runtime-<n>` release (scripts/runtime_packs.py), TensorRT-RTX from libaji's release, the models
-//! from the MangaJaNai model releases. libaji itself ships in the program's archive.
+//! Sources, each checked against a SHA-256 compiled in here: the runtime packs from the shared
+//! `runtime-<n>` release (animejanai-inference scripts/runtime_packs.py), TensorRT-RTX from
+//! libaji's release, the models from the MangaJaNai model releases. libaji itself ships in the
+//! program's archive.
 //!
 //! Runtime files go next to the program, models into `models/` beside it, and `setup.json` records
 //! what was installed (by archive SHA-256), so a re-run fetches only what's missing or changed.
@@ -34,13 +35,14 @@ use sha2::{Digest, Sha256};
 
 use crate::nvml;
 
-const RUNTIME_REPO: &str = "the-database/MangaJaNaiCLI";
-/// The runtime packs' release (scripts/runtime_packs.py TAG) and the SHA-256 of its
-/// packs-<platform>.json, which pins every pack. Empty: this build has no published packs to use
-/// (development builds use `--mirror`).
-const RUNTIME_TAG: &str = "runtime-1";
-const RUNTIME_INDEX_SHA256_WINDOWS: &str = "25c350b9b507a69ed05a300f1d894d8c78e39160a23ff1b45b6a2348bdf60e26";
-const RUNTIME_INDEX_SHA256_LINUX: &str = "a00a6aa8b9ce794d2d6917bb4cea5bf6759583aa959442fa032d2ecda4b76e60";
+/// The runtime packs, for both modes: the shared runtime release every libaji app pins
+/// (animejanai-inference scripts/runtime_packs.py TAG; its runtime-packs.yml asks bump-pins.yml
+/// here for the bump PR), and the SHA-256 of each packs-<platform>.json, which pins every pack.
+/// (runtime-1, on this repo, was the CLI's own release before it.)
+const RUNTIME_REPO: &str = "the-database/animejanai-inference";
+const RUNTIME_TAG: &str = "runtime-2";
+const RUNTIME_INDEX_SHA256_WINDOWS: &str = "5b6f0450ba4eed34d6e25dde072ce1298f083d91d142fd858495483e7711aea1";
+const RUNTIME_INDEX_SHA256_LINUX: &str = "d441210f7747b255f17483f7c8b921817ad3f997abab5a1ba5d348b51511ab61";
 
 /// TensorRT-RTX: aji_trtrtx.dll + the TensorRT for RTX runtime, from the libaji release this
 /// program's archive bundles.
@@ -58,14 +60,6 @@ const MODELS: &[(&str, &str, &str, &str, u64)] = &[
     ("models-illustrationjanai-fp32", "3.0.0", "IllustrationJaNai_V3_ONNX_fp32.7z", "8b38bfdc95f194fb18eaa51d7ca869839ebbb1c29bed1e7a943a65b372d090ac", 234_850_558),
     ("models-illustrationjanai-bf16", "3.0.0", "IllustrationJaNai_V3_ONNX_bf16.7z", "48e292c3f92aa2df79f9f83c6318a6c2052c29e6ea9fe2ed23b61cc526900247", 93_681_845),
 ];
-
-/// Store mode's runtime release: the shared runtime packs (animejanai-inference
-/// scripts/runtime_packs.py TAG) and the SHA-256 of each packs-<platform>.json, which pins every
-/// pack.
-const STORE_REPO: &str = "the-database/animejanai-inference";
-const STORE_TAG: &str = "runtime-2";
-const STORE_INDEX_SHA256_WINDOWS: &str = "5b6f0450ba4eed34d6e25dde072ce1298f083d91d142fd858495483e7711aea1";
-const STORE_INDEX_SHA256_LINUX: &str = "d441210f7747b255f17483f7c8b921817ad3f997abab5a1ba5d348b51511ab61";
 
 const STATE_FILE: &str = "setup.json";
 const DOWNLOAD_DIR: &str = ".setup-download";
@@ -134,6 +128,16 @@ struct Pack {
     asset: String,
     sha256: String,
     bytes: u64,
+    /// Each file's SHA-256 and size (the shared release's index has them).
+    #[serde(default)]
+    files: Vec<PackFile>,
+}
+
+#[derive(Deserialize, Clone, Debug, PartialEq)]
+struct PackFile {
+    path: String,
+    sha256: String,
+    bytes: u64,
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -170,6 +174,8 @@ struct Component {
     format: Format,
     /// Extract into `models/` instead of next to the program.
     models: bool,
+    /// The files the archive holds, with their SHA-256s (runtime packs; empty when unknown).
+    files: Vec<PackFile>,
 }
 
 fn platform() -> &'static str {
@@ -383,6 +389,7 @@ fn plan(opts: &Options, gpus: &[nvml::Gpu]) -> Result<Vec<Component>, String> {
         bytes: p.bytes,
         format: Format::SevenZ,
         models: false,
+        files: p.files,
     };
     let mut out = Vec::new();
     if cfg!(windows) {
@@ -409,6 +416,7 @@ fn plan(opts: &Options, gpus: &[nvml::Gpu]) -> Result<Vec<Component>, String> {
                 bytes: TRTRTX_BYTES,
                 format: Format::Zip,
                 models: false,
+                files: Vec::new(),
             });
         }
     } else if !cfg!(windows) {
@@ -431,6 +439,7 @@ fn plan(opts: &Options, gpus: &[nvml::Gpu]) -> Result<Vec<Component>, String> {
                 bytes: *bytes,
                 format: Format::SevenZ,
                 models: true,
+                files: Vec::new(),
             });
         }
     }
@@ -448,6 +457,40 @@ fn save_state(dir: &Path, s: &State) -> Result<(), String> {
 
 fn rel_path(c: &Component, f: &str) -> String {
     if c.models { format!("models/{f}") } else { f.to_string() }
+}
+
+/// Components installed from an older archive whose files are exactly the new archive's (a new
+/// runtime release that repacked the same files: runtime-1 to runtime-2) are recorded as the new
+/// one instead of downloaded again.
+fn refresh_unchanged(dir: &Path, wanted: &[Component], state: &mut State) -> Result<(), String> {
+    let mut changed = false;
+    for c in wanted.iter().filter(|c| !c.files.is_empty()) {
+        let Some(i) = state.components.get(&c.name) else { continue };
+        if i.sha256 == c.sha256 {
+            continue;
+        }
+        let mut have: Vec<&str> = i.files.iter().map(String::as_str).collect();
+        let mut want: Vec<String> = c.files.iter().map(|f| rel_path(c, &f.path)).collect();
+        have.sort_unstable();
+        want.sort();
+        if have != want {
+            continue;
+        }
+        let same = c.files.iter().all(|f| {
+            let p = dir.join(rel_path(c, &f.path));
+            std::fs::metadata(&p).is_ok_and(|m| m.len() == f.bytes) && sha256_file(&p).is_ok_and(|h| h == f.sha256)
+        });
+        if same {
+            let i = state.components.get_mut(&c.name).expect("checked above");
+            i.sha256 = c.sha256.clone();
+            i.version = c.version.clone();
+            changed = true;
+        }
+    }
+    if changed {
+        save_state(dir, state)?;
+    }
+    Ok(())
 }
 
 fn needed(dir: &Path, c: &Component, state: &State) -> bool {
@@ -483,6 +526,7 @@ pub fn run(opts: &Options) -> Result<i32, String> {
     print_gpus(&gpus);
     let wanted = plan(opts, &gpus)?;
     let mut state = load_state(&dir);
+    refresh_unchanged(&dir, &wanted, &mut state)?;
     let needed = |c: &Component, state: &State| needed(&dir, c, state);
 
     eprintln!("\nInstall folder: {}", dir.display());
@@ -574,11 +618,11 @@ fn store_index(opts: &Options) -> Result<aji_runtime::Index, String> {
             aji_runtime::Index::parse(&b, None).map_err(|e| e.to_string())
         }
         None => {
-            let pin = if cfg!(windows) { STORE_INDEX_SHA256_WINDOWS } else { STORE_INDEX_SHA256_LINUX };
+            let pin = if cfg!(windows) { RUNTIME_INDEX_SHA256_WINDOWS } else { RUNTIME_INDEX_SHA256_LINUX };
             if pin.is_empty() {
-                return Err(format!("this build of mangajanai has no shared runtime pinned ({STORE_TAG} isn't published yet)"));
+                return Err(format!("this build of mangajanai has no shared runtime pinned ({RUNTIME_TAG} isn't published yet)"));
             }
-            let url = format!("https://github.com/{STORE_REPO}/releases/download/{STORE_TAG}/{file}");
+            let url = format!("https://github.com/{RUNTIME_REPO}/releases/download/{RUNTIME_TAG}/{file}");
             aji_runtime::Index::load(&url, Some(pin)).map_err(|e| e.to_string())
         }
     }
@@ -671,9 +715,11 @@ fn run_store(opts: &Options, dir: &Path, mode: &StoreMode) -> Result<i32, String
             bytes: p.bytes,
             format: Format::SevenZ,
             models: false,
+            files: p.files.iter().map(|f| PackFile { path: f.path.clone(), sha256: f.sha256.clone(), bytes: f.bytes }).collect(),
         });
     }
     let mut state = load_state(dir);
+    refresh_unchanged(dir, &private, &mut state)?;
     let store = store_open()?;
     eprintln!("\nInstall folder: {}", dir.display());
     eprintln!("Shared pack store: {} (as {})", store.root().display(), mode.app_id);
@@ -875,6 +921,42 @@ mod tests {
         assert!(remove_private_copies(&dir, &mut state, &packs).is_empty());
         assert!(dir.join("tensorrt_rtx_1_7.dll").is_file());
         assert_eq!(state.components.len(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_repacked_archive_with_the_same_files_is_not_downloaded_again() {
+        let dir = std::env::temp_dir().join(format!("mangajanai-repacked-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("nvinfer_11.dll"), b"nv").unwrap();
+        std::fs::write(dir.join("trtexec.exe"), b"te").unwrap();
+        let comp = |sha: &str, files: &[(&str, &[u8])]| Component {
+            name: "trt-runtime".into(),
+            version: "11.4.0.106-cuda13.4".into(),
+            url: String::new(),
+            asset: "trt-runtime-windows-x64.7z".into(),
+            sha256: sha.into(),
+            bytes: 1,
+            format: Format::SevenZ,
+            models: false,
+            files: files.iter().map(|(p, d)| PackFile { path: p.to_string(), sha256: sha256_bytes(d), bytes: d.len() as u64 }).collect(),
+        };
+        let mut state = State::default();
+        state.components.insert("trt-runtime".into(), installed(&["nvinfer_11.dll", "trtexec.exe"]));
+        // same files in a new archive: recorded as the new one
+        let same = comp("new", &[("nvinfer_11.dll", b"nv"), ("trtexec.exe", b"te")]);
+        refresh_unchanged(&dir, std::slice::from_ref(&same), &mut state).unwrap();
+        assert!(!needed(&dir, &same, &state));
+        assert_eq!(state.components["trt-runtime"].version, "11.4.0.106-cuda13.4");
+        // a file that changed: downloaded
+        let changed = comp("newer", &[("nvinfer_11.dll", b"nv 2"), ("trtexec.exe", b"te")]);
+        refresh_unchanged(&dir, std::slice::from_ref(&changed), &mut state).unwrap();
+        assert!(needed(&dir, &changed, &state));
+        // a file more or less: downloaded
+        let more = comp("more", &[("nvinfer_11.dll", b"nv"), ("trtexec.exe", b"te"), ("x.dll", b"x")]);
+        refresh_unchanged(&dir, std::slice::from_ref(&more), &mut state).unwrap();
+        assert!(needed(&dir, &more, &state));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

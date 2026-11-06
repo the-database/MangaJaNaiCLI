@@ -6,7 +6,7 @@ name: release
 #                                    builder downloads it from the release whose tag it pins
 #   mangajanai-windows-x64.zip       mangajanai.exe + libaji + the VC++ runtime
 #   mangajanai-linux-x64.tar.zst     mangajanai + libaji (TensorRT backend)
-# `mangajanai setup` then downloads the GPU runtime (the runtime-<n> release, runtime-packs.yml) and
+# `mangajanai setup` then downloads the GPU runtime (animejanai-inference's runtime-<n> release) and
 # the models next to the program.
 on:
   push:

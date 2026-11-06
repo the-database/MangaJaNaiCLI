@@ -43,7 +43,7 @@ ravif = { version = "0.13.0", default-features = false, features = ["threading"]
 ureq = "3"
 sha2 = "0.10"
 sevenz-rust2 = { version = "0.24", default-features = false, features = ["util"] }
-libloading = "0.8"
+libloading = "0.9"
 
 [build-dependencies]
 embed-manifest = "1.5.1"

@@ -169,11 +169,16 @@ fn sha256_file(path: &Path) -> Result<String, String> {
         }
         h.update(&buf[..n]);
     }
-    Ok(format!("{:x}", h.finalize()))
+    Ok(hex(&h.finalize()))
+}
+
+/// Lowercase hex (sha2 0.11's digests don't implement LowerHex).
+fn hex(d: &[u8]) -> String {
+    d.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 fn sha256_bytes(b: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(b))
+    hex(&Sha256::digest(b))
 }
 
 /// Download `url` to `dest`, showing progress on stderr (and as `SETUP_DOWNLOAD` lines).

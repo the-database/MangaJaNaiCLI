@@ -42,6 +42,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "aji-runtime"
+version = "0.1.0"
+source = "git+https://github.com/the-database/aji-runtime?rev=252c1a65e165d9bedcbfe10d6893484eb73291ca#252c1a65e165d9bedcbfe10d6893484eb73291ca"
+dependencies = [
+ "libloading 0.9.0",
+ "serde",
+ "serde_json",
+ "sevenz-rust2",
+ "sha2",
+ "ureq",
+ "zip",
+]
+
+[[package]]
 name = "aligned"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1178,6 +1192,7 @@ dependencies = [
 name = "mangajanai-cli"
 version = "0.3.1"
 dependencies = [
+ "aji-runtime",
  "embed-manifest",
  "jpeg-encoder",
  "libloading 0.9.0",

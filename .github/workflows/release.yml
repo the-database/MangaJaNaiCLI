@@ -118,6 +118,16 @@ jobs:
           gh release download $env:AJI_VERSION -R the-database/animejanai-inference -p aji-windows-x64.zip
           Expand-Archive aji-windows-x64.zip aji
           foreach ($f in 'aji.dll', 'aji_trt.dll', 'aji_dml.dll') { Copy-Item "aji/$f" package-trt/ }
+          # aji_trtrtx.dll alone (its runtime comes from the pack store in `setup --store`, or with the
+          # private trt-rtx component), from libaji releases that publish it separately
+          gh release download $env:AJI_VERSION -R the-database/animejanai-inference -p aji-trtrtx-backend-windows-x64.zip
+          if ($LASTEXITCODE -eq 0) {
+            Expand-Archive aji-trtrtx-backend-windows-x64.zip aji -Force
+            Copy-Item aji/aji_trtrtx.dll package-trt/
+          } else {
+            Write-Host "::warning::libaji $env:AJI_VERSION has no aji-trtrtx-backend-windows-x64.zip; setup --store installs no TensorRT-RTX"
+            $global:LASTEXITCODE = 0
+          }
           $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * `
             -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
           $crt = Get-ChildItem "$vs\VC\Redist\MSVC\*\x64\Microsoft.VC14*.CRT" -Directory |

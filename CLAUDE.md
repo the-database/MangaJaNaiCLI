@@ -74,6 +74,27 @@ To change a TensorRT/ORT/DirectML version:
 
 `--mirror <folder>` installs from local archives, for testing before anything is published.
 
+**Store mode** (`setup --store --app-id ID --app-path EXE`): an app's install of the CLI (yosh's
+add-on) shares TensorRT, its builder packs, TensorRT-RTX and the models with the other apps
+through the per-user pack store ([aji-runtime](https://github.com/the-database/aji-runtime),
+a library dependency). The packs come from the shared runtime release, animejanai-inference
+`runtime-<n>` (`STORE_TAG` and `STORE_INDEX_SHA256_*` in `setup.rs`; test unpublished packs with
+`--mirror` holding that release's assets and index). In store mode:
+
+- Matching files already in the folder are adopted, then this folder's private copies are removed.
+  libaji's files always stay.
+- ONNX Runtime + DirectML stay private.
+- `aji-runtime.json` beside libaji points it at the store, which needs a libaji with
+  `core/runtime_packs`. TensorRT-RTX needs `aji_trtrtx.dll` in the folder (`release.yml` bundles
+  it from libaji's `aji-trtrtx-backend-windows-x64.zip`).
+- The model search adds the app's model packs.
+- The engine cache defaults to `cache/` beside the program, since store packs are read-only.
+- `setup.json` records the mode, and a plain `setup` stays in it.
+- `setup --remove` drops the ref; the app's uninstaller runs it before deleting the folder.
+
+`AJI_RUNTIME_STORE` points the store elsewhere: use it for tests, never the real one. Without
+`--store` (a portable CLI) nothing changes.
+
 **yosh installs its AI add-on with this program**: it downloads `mangajanai-windows-x64.zip` /
 `mangajanai-linux-x64.tar.zst` from a release it pins (by SHA-256) into its add-on folder and runs
 `mangajanai setup --progress lines` there, reading the `SETUP_*` stdout lines (`setup.rs`, `Lines`).

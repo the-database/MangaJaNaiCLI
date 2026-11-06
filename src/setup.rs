@@ -14,6 +14,16 @@
 //!
 //! Runtime files go next to the program, models into `models/` beside it, and `setup.json` records
 //! what was installed (by archive SHA-256), so a re-run fetches only what's missing or changed.
+//!
+//! **Store mode** (`setup --store --app-id ID --app-path EXE`, for a CLI an app installed, e.g.
+//! yosh's add-on): TensorRT, its builder packs, TensorRT-RTX and the models go into the per-user
+//! pack store instead, shared with the other apps (the-database/aji-runtime), from the shared
+//! runtime release (animejanai-inference `runtime-<n>`). Matching files already in this folder are
+//! taken over instead of downloaded, and removed from here once the store has them. libaji finds
+//! the store through `aji-runtime.json`, the model search through the app's ref. ONNX Runtime +
+//! DirectML stay private, next to the program. `setup.json` remembers the mode, so a plain
+//! `setup` re-run stays in it; `setup --remove` drops the app's ref (its uninstaller runs it).
+//! Without `--store` (a portable CLI) nothing changes.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{IsTerminal, Read, Write};
@@ -35,10 +45,10 @@ const RUNTIME_INDEX_SHA256_LINUX: &str = "a00a6aa8b9ce794d2d6917bb4cea5bf6759583
 /// TensorRT-RTX: aji_trtrtx.dll + the TensorRT for RTX runtime, from the libaji release this
 /// program's archive bundles.
 const AJI_REPO: &str = "the-database/animejanai-inference";
-const AJI_VERSION: &str = "v0.21.0";
+const AJI_VERSION: &str = "v0.23.0";
 const TRTRTX_ASSET: &str = "aji-trtrtx-windows-x64.zip";
-const TRTRTX_SHA256: &str = "213204243f947affebbe32db99379a4fea74cc1ab50657370dfff26fb72df0de";
-const TRTRTX_BYTES: u64 = 95_346_023;
+const TRTRTX_SHA256: &str = "d974804c20afdd080ff2e1164477968f432d01cd9cd8886d23e484158ec6f179";
+const TRTRTX_BYTES: u64 = 95_346_418;
 
 /// The default models, the same archives (and SHA-256s) MangaJaNai GUI installs.
 const MODELS_REPO: &str = "the-database/MangaJaNai";
@@ -48,6 +58,14 @@ const MODELS: &[(&str, &str, &str, &str, u64)] = &[
     ("models-illustrationjanai-fp32", "3.0.0", "IllustrationJaNai_V3_ONNX_fp32.7z", "8b38bfdc95f194fb18eaa51d7ca869839ebbb1c29bed1e7a943a65b372d090ac", 234_850_558),
     ("models-illustrationjanai-bf16", "3.0.0", "IllustrationJaNai_V3_ONNX_bf16.7z", "48e292c3f92aa2df79f9f83c6318a6c2052c29e6ea9fe2ed23b61cc526900247", 93_681_845),
 ];
+
+/// Store mode's runtime release: the shared runtime packs (animejanai-inference
+/// scripts/runtime_packs.py TAG) and the SHA-256 of each packs-<platform>.json, which pins every
+/// pack.
+const STORE_REPO: &str = "the-database/animejanai-inference";
+const STORE_TAG: &str = "runtime-2";
+const STORE_INDEX_SHA256_WINDOWS: &str = "5b6f0450ba4eed34d6e25dde072ce1298f083d91d142fd858495483e7711aea1";
+const STORE_INDEX_SHA256_LINUX: &str = "d441210f7747b255f17483f7c8b921817ad3f997abab5a1ba5d348b51511ab61";
 
 const STATE_FILE: &str = "setup.json";
 const DOWNLOAD_DIR: &str = ".setup-download";
@@ -61,6 +79,24 @@ pub struct Options {
     /// `--progress lines`: also report on stdout in lines another program can read (yosh installs
     /// its AI add-on this way). See [`Lines`].
     pub lines: bool,
+    /// `--store --app-id ID --app-path EXE`: install into the shared pack store as app ID.
+    pub store: Option<StoreMode>,
+    /// `--remove`: in store mode, drop this app's ref (before its folder is deleted).
+    pub remove: bool,
+}
+
+/// Which installed app this CLI belongs to (its ref in the pack store).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct StoreMode {
+    pub app_id: String,
+    /// The app's executable: the store keeps this app's packs while it exists.
+    pub app_path: PathBuf,
+}
+
+impl Options {
+    pub fn private(no_models: bool) -> Options {
+        Options { no_models, check: false, mirror: None, lines: false, store: None, remove: false }
+    }
 }
 
 /// The stdout line protocol of `setup --progress lines`, one event per line, fields separated by
@@ -102,7 +138,11 @@ struct Pack {
 
 #[derive(Serialize, Deserialize, Default)]
 struct State {
+    /// What setup installed here (store mode: only what stays private, ONNX Runtime + DirectML).
     components: BTreeMap<String, Installed>,
+    /// Set in store mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    store: Option<StoreMode>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -145,7 +185,22 @@ pub fn install_dir() -> PathBuf {
 /// for what setup adds).
 pub fn runtime_installed(dir: &Path) -> bool {
     let probe: &[&str] = if cfg!(windows) { &["nvinfer_11.dll", "onnxruntime.dll"] } else { &["libnvinfer.so.11"] };
-    probe.iter().any(|f| dir.join(f).is_file())
+    // store mode: libaji loads TensorRT from the pack store through aji-runtime.json
+    probe.iter().any(|f| dir.join(f).is_file()) || dir.join("aji-runtime.json").is_file()
+}
+
+/// The store mode setup recorded in `dir`, if any.
+pub fn store_mode(dir: &Path) -> Option<StoreMode> {
+    load_state(dir).store
+}
+
+/// In store mode: the model pack folders this app's ref lists, for the model search.
+pub fn store_model_dirs(dir: &Path) -> Vec<PathBuf> {
+    let Some(mode) = store_mode(dir) else { return Vec::new() };
+    let Some(store) = aji_runtime::Store::default_root().ok().and_then(|r| aji_runtime::Store::open_existing(&r)) else {
+        return Vec::new();
+    };
+    aji_runtime::app_packs(&store, &mode.app_id).into_iter().filter(|(m, _)| m.kind == "models").map(|(_, d)| d).collect()
 }
 
 /// TensorRT-RTX's default GPUs, as MangaJaNai GUI and yosh decide it: Turing (7.5), consumer
@@ -169,11 +224,16 @@ fn sha256_file(path: &Path) -> Result<String, String> {
         }
         h.update(&buf[..n]);
     }
-    Ok(format!("{:x}", h.finalize()))
+    Ok(hex(&h.finalize()))
+}
+
+/// Lowercase hex (sha2 0.11's digests don't implement LowerHex).
+fn hex(d: &[u8]) -> String {
+    d.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 fn sha256_bytes(b: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(b))
+    hex(&Sha256::digest(b))
 }
 
 /// Download `url` to `dest`, showing progress on stderr (and as `SETUP_DOWNLOAD` lines).
@@ -188,8 +248,8 @@ fn download(url: &str, dest: &Path, label: &str, expected: u64, lines: &Lines) -
     let mut reader = resp.into_body().into_reader();
     let part = dest.with_extension("part");
     let mut out = std::io::BufWriter::new(std::fs::File::create(&part).map_err(|e| format!("{}: {e}", part.display()))?);
-    let tty = std::io::stderr().is_terminal();
-    let (mut got, mut shown, mut said) = (0u64, u64::MAX, u64::MAX);
+    let mut shown = Shown::new();
+    let (mut got, mut said) = (0u64, u64::MAX);
     lines.say(format_args!("SETUP_DOWNLOAD {label} 0 {total}"));
     let mut buf = vec![0u8; 1 << 20];
     loop {
@@ -199,30 +259,48 @@ fn download(url: &str, dest: &Path, label: &str, expected: u64, lines: &Lines) -
         }
         out.write_all(&buf[..n]).map_err(|e| e.to_string())?;
         got += n as u64;
-        if total > 0 {
-            let t = total;
-            let pct = got * 100 / t;
+        if let Some(pct) = (got * 100).checked_div(total) {
             if pct != said {
                 said = pct;
-                lines.say(format_args!("SETUP_DOWNLOAD {label} {got} {t}"));
+                lines.say(format_args!("SETUP_DOWNLOAD {label} {got} {total}"));
             }
-            let step = if tty { pct } else { pct / 25 * 25 };
-            if step != shown {
-                shown = step;
-                if tty {
-                    eprint!("\r  {label}: {pct:>3}%  {} / {}   ", mb(got), mb(t));
-                } else {
-                    eprintln!("  {label}: {pct}%");
-                }
-            }
+            shown.show(label, got, total);
         }
     }
     out.flush().map_err(|e| e.to_string())?;
     drop(out);
-    if tty {
-        eprintln!();
-    }
+    shown.end();
     std::fs::rename(&part, dest).map_err(|e| format!("{}: {e}", dest.display()))
+}
+
+/// Download percentages on stderr: every percent in a terminal, else every 25%.
+struct Shown {
+    tty: bool,
+    step: u64,
+}
+
+impl Shown {
+    fn new() -> Shown {
+        Shown { tty: std::io::stderr().is_terminal(), step: u64::MAX }
+    }
+    fn show(&mut self, label: &str, got: u64, total: u64) {
+        let pct = (got * 100).checked_div(total).unwrap_or(0);
+        let step = if self.tty { pct } else { pct / 25 * 25 };
+        if step != self.step {
+            self.step = step;
+            if self.tty {
+                eprint!("\r  {label}: {pct:>3}%  {} / {}   ", mb(got), mb(total));
+            } else {
+                eprintln!("  {label}: {pct}%");
+            }
+        }
+    }
+    fn end(&mut self) {
+        if self.tty && self.step != u64::MAX {
+            eprintln!();
+        }
+        self.step = u64::MAX;
+    }
 }
 
 /// Extract an archive into `dest`, returning the files it wrote (relative to `dest`).
@@ -372,24 +450,40 @@ fn rel_path(c: &Component, f: &str) -> String {
     if c.models { format!("models/{f}") } else { f.to_string() }
 }
 
-/// Run setup. Returns the exit code.
-pub fn run(opts: &Options) -> Result<i32, String> {
-    let dir = install_dir();
-    let lines = Lines(opts.lines);
-    let gpus = nvml::gpus();
+fn needed(dir: &Path, c: &Component, state: &State) -> bool {
+    match state.components.get(&c.name) {
+        Some(i) => i.sha256 != c.sha256 || i.files.iter().any(|f| !dir.join(f).exists()),
+        None => true,
+    }
+}
+
+fn print_gpus(gpus: &[nvml::Gpu]) {
     if gpus.is_empty() {
         eprintln!("GPU: no NVIDIA GPU found{}", if cfg!(windows) { "; using DirectML (AMD/Intel/other GPUs)" } else { "" });
     } else {
-        for g in &gpus {
+        for g in gpus {
             eprintln!("GPU: {} (compute {}.{})", g.name, g.major, g.minor);
         }
     }
+}
+
+/// Run setup. Returns the exit code.
+pub fn run(opts: &Options) -> Result<i32, String> {
+    let dir = install_dir();
+    // a store install stays one when setup runs again without the flags
+    let store = opts.store.clone().or_else(|| load_state(&dir).store);
+    if opts.remove {
+        return remove(&dir, store, &Lines(opts.lines));
+    }
+    if let Some(mode) = store {
+        return run_store(opts, &dir, &mode);
+    }
+    let lines = Lines(opts.lines);
+    let gpus = nvml::gpus();
+    print_gpus(&gpus);
     let wanted = plan(opts, &gpus)?;
     let mut state = load_state(&dir);
-    let needed = |c: &Component, state: &State| match state.components.get(&c.name) {
-        Some(i) => i.sha256 != c.sha256 || i.files.iter().any(|f| !dir.join(f).exists()),
-        None => true,
-    };
+    let needed = |c: &Component, state: &State| needed(&dir, c, state);
 
     eprintln!("\nInstall folder: {}", dir.display());
     let mut total = 0u64;
@@ -412,12 +506,24 @@ pub fn run(opts: &Options) -> Result<i32, String> {
     if opts.check {
         return Ok(0);
     }
+    install_components(&dir, &todo, &mut state, opts, &lines)?;
+    eprintln!("\nSetup complete. Try: mangajanai devices, then mangajanai init");
+    lines.say(format_args!("SETUP_DONE"));
+    Ok(0)
+}
 
+/// Download, check and extract private components next to the program, recording them in
+/// setup.json.
+fn install_components(dir: &Path, todo: &[&Component], state: &mut State, opts: &Options, lines: &Lines) -> Result<(), String> {
+    if todo.is_empty() {
+        return Ok(());
+    }
+    let dir = dir.to_path_buf();
     let dl = dir.join(DOWNLOAD_DIR);
     std::fs::create_dir_all(&dl).map_err(|e| {
         format!("can't write next to the program ({}): {e}. Move mangajanai to a folder you can write to and run setup again.", dir.display())
     })?;
-    for c in todo {
+    for &c in todo {
         let archive = dl.join(&c.asset);
         let have = archive.is_file() && sha256_file(&archive)? == c.sha256;
         if !have {
@@ -427,7 +533,7 @@ pub fn run(opts: &Options) -> Result<i32, String> {
                     std::fs::copy(m.join(&c.asset), &archive).map_err(|e| format!("{}: {e}", m.join(&c.asset).display()))?;
                     lines.say(format_args!("SETUP_DOWNLOAD {} {} {}", c.name, c.bytes, c.bytes));
                 }
-                None => download(&c.url, &archive, &c.name, c.bytes, &lines)?,
+                None => download(&c.url, &archive, &c.name, c.bytes, lines)?,
             }
             let got = sha256_file(&archive)?;
             if got != c.sha256 {
@@ -446,11 +552,345 @@ pub fn run(opts: &Options) -> Result<i32, String> {
             }
         }
         state.components.insert(c.name.clone(), Installed { version: c.version.clone(), sha256: c.sha256.clone(), files });
-        save_state(&dir, &state)?;
+        save_state(&dir, state)?;
         let _ = std::fs::remove_file(&archive);
     }
     let _ = std::fs::remove_dir(&dl);
+    Ok(())
+}
+
+fn store_open() -> Result<aji_runtime::Store, String> {
+    let root = aji_runtime::Store::default_root().map_err(|e| e.to_string())?;
+    aji_runtime::Store::open(&root).map_err(|e| e.to_string())
+}
+
+/// Store mode's index: the shared runtime release's, checked against its pin (from `--mirror`:
+/// unchecked, as for the private packs).
+fn store_index(opts: &Options) -> Result<aji_runtime::Index, String> {
+    let file = format!("packs-{}.json", platform());
+    match &opts.mirror {
+        Some(dir) => {
+            let b = std::fs::read(dir.join(&file)).map_err(|e| format!("{}: {e}", dir.join(&file).display()))?;
+            aji_runtime::Index::parse(&b, None).map_err(|e| e.to_string())
+        }
+        None => {
+            let pin = if cfg!(windows) { STORE_INDEX_SHA256_WINDOWS } else { STORE_INDEX_SHA256_LINUX };
+            if pin.is_empty() {
+                return Err(format!("this build of mangajanai has no shared runtime pinned ({STORE_TAG} isn't published yet)"));
+            }
+            let url = format!("https://github.com/{STORE_REPO}/releases/download/{STORE_TAG}/{file}");
+            aji_runtime::Index::load(&url, Some(pin)).map_err(|e| e.to_string())
+        }
+    }
+}
+
+/// What store mode installs, as `aji_runtime::Index::select` wants: TensorRT with this machine's
+/// builder packs, TensorRT-RTX where it's the default (if this folder has its libaji backend),
+/// and the models, chosen as in [`plan`].
+fn store_wants(dir: &Path, gpus: &[nvml::Gpu], no_models: bool) -> Result<Vec<String>, String> {
+    let mut w = Vec::new();
+    if !gpus.is_empty() {
+        w.push("trt".to_string());
+        if cfg!(windows) && gpus.iter().any(trtrtx_default) && dir.join("aji_trtrtx.dll").is_file() {
+            w.push("trtrtx".to_string());
+        }
+    } else if !cfg!(windows) {
+        return Err("no NVIDIA GPU found. On Linux mangajanai runs on TensorRT, which needs an NVIDIA GPU and driver.".into());
+    }
+    if !no_models {
+        let bf16 = gpus.iter().any(|g| g.major >= 8);
+        w.push("models-mangajanai".into());
+        w.push("models-illustrationjanai".into());
+        w.push(if bf16 { "models-illustrationjanai-bf16" } else { "models-illustrationjanai-fp32" }.into());
+    }
+    Ok(w)
+}
+
+fn is_libaji(f: &str) -> bool {
+    let n = f.rsplit('/').next().unwrap_or(f).to_ascii_lowercase();
+    (n.starts_with("aji") && n.ends_with(".dll")) || n.starts_with("libaji")
+}
+
+/// After the store has an app's packs: remove this folder's private copies of them, i.e. the
+/// components setup installed here that the store now provides, and untracked files identical to
+/// a store file (an install from before setup.json). libaji's own files always stay.
+fn remove_private_copies(dir: &Path, state: &mut State, packs: &[(aji_runtime::IndexPack, PathBuf)]) -> Vec<String> {
+    let has = |name: &str| packs.iter().any(|(p, _)| p.name == name);
+    let has_kind = |kind: &str| packs.iter().any(|(p, _)| p.kind == kind);
+    let covered = |c: &str| match c {
+        "trt-rtx" => has_kind("trtrtx"),
+        c if c.starts_with("trt-") => has_kind("trt"),
+        c => has(c),
+    };
+    let mut removed = Vec::new();
+    for name in state.components.keys().filter(|k| covered(k)).cloned().collect::<Vec<_>>() {
+        if let Some(c) = state.components.remove(&name) {
+            for f in c.files.iter().filter(|f| !is_libaji(f)) {
+                if std::fs::remove_file(dir.join(f)).is_ok() {
+                    removed.push(f.clone());
+                }
+            }
+        }
+    }
+    for (p, _) in packs {
+        for f in &p.files {
+            for (rel, cand) in [(f.path.clone(), dir.join(&f.path)), (format!("models/{}", f.path), dir.join("models").join(&f.path))] {
+                let same = std::fs::metadata(&cand).is_ok_and(|m| m.is_file() && m.len() == f.bytes)
+                    && sha256_file(&cand).is_ok_and(|h| h == f.sha256);
+                if same && !is_libaji(&rel) && std::fs::remove_file(&cand).is_ok() {
+                    removed.push(rel);
+                }
+            }
+        }
+    }
+    let _ = std::fs::remove_dir(dir.join("models"));
+    removed
+}
+
+/// `setup` in store mode. The SETUP_* lines are the same as in private mode; a pack taken over from
+/// this folder counts as installed.
+fn run_store(opts: &Options, dir: &Path, mode: &StoreMode) -> Result<i32, String> {
+    let lines = Lines(opts.lines);
+    let gpus = nvml::gpus();
+    print_gpus(&gpus);
+    let index = store_index(opts)?;
+    let wants = store_wants(dir, &gpus, opts.no_models)?;
+    let rgpus: Vec<aji_runtime::nvml::Gpu> =
+        gpus.iter().map(|g| aji_runtime::nvml::Gpu { name: g.name.clone(), major: g.major, minor: g.minor }).collect();
+    let packs = index.select(&wants, &rgpus).map_err(|e| e.to_string())?;
+    // ONNX Runtime + DirectML: private, as before
+    let mut private = Vec::new();
+    if cfg!(windows) {
+        let p = index.pack("dml-runtime").ok_or("the shared runtime has no dml-runtime")?;
+        private.push(Component {
+            name: p.name.clone(),
+            version: p.version.clone(),
+            url: p.url.clone(),
+            asset: p.asset.clone(),
+            sha256: p.sha256.clone(),
+            bytes: p.bytes,
+            format: Format::SevenZ,
+            models: false,
+        });
+    }
+    let mut state = load_state(dir);
+    let store = store_open()?;
+    eprintln!("\nInstall folder: {}", dir.display());
+    eprintln!("Shared pack store: {} (as {})", store.root().display(), mode.app_id);
+    let private_todo: Vec<&Component> = private.iter().filter(|c| needed(dir, c, &state)).collect();
+    for c in &private {
+        let todo = private_todo.iter().any(|t| t.name == c.name);
+        eprintln!("  {:<32} {:<26} {:>8}  {}", c.name, c.version, mb(c.bytes), if todo { "to download" } else { "installed" });
+        lines.say(format_args!("SETUP_PLAN {} {} {}", c.name, c.bytes, if todo { "download" } else { "installed" }));
+    }
+    let private_bytes: u64 = private_todo.iter().map(|c| c.bytes).sum();
+    let ensure = aji_runtime::EnsureOptions {
+        app_id: mode.app_id.clone(),
+        app_version: env!("CARGO_PKG_VERSION").into(),
+        app_path: mode.app_path.clone(),
+        packs,
+        mirror: opts.mirror.clone(),
+        adopt_from: vec![dir.to_path_buf()],
+        aji_dir: Some(dir.to_path_buf()),
+        check: opts.check,
+    };
+    let mut total = 0u64;
+    let mut shown = Shown::new();
+    let r = aji_runtime::ensure(&store, &ensure, &mut |ev| match ev {
+        aji_runtime::Event::Waiting => eprintln!("  (waiting for another installer to finish with the pack store)"),
+        aji_runtime::Event::Plan { pack, state } => {
+            let (human, line) = match state {
+                aji_runtime::PlanState::Installed => ("in the pack store", "installed"),
+                aji_runtime::PlanState::Adopted => ("moved to the pack store", "installed"),
+                aji_runtime::PlanState::Download => ("to download", "download"),
+            };
+            eprintln!("  {:<32} {:<26} {:>8}  {human}", pack.name, pack.version, mb(pack.bytes));
+            lines.say(format_args!("SETUP_PLAN {} {} {line}", pack.name, pack.bytes));
+        }
+        aji_runtime::Event::Total(t) => {
+            total = t + private_bytes;
+            lines.say(format_args!("SETUP_TOTAL {total}"));
+        }
+        aji_runtime::Event::Download { pack, got, total } => {
+            lines.say(format_args!("SETUP_DOWNLOAD {} {got} {total}", pack.name));
+            shown.show(&pack.name, got, total);
+        }
+        aji_runtime::Event::Extract { pack } => {
+            shown.end();
+            eprintln!("  {}: extracting", pack.name);
+            lines.say(format_args!("SETUP_EXTRACT {}", pack.name));
+        }
+        aji_runtime::Event::Done => {}
+    })
+    .map_err(|e| e.to_string())?;
+    if opts.check {
+        if r.complete && private_todo.is_empty() {
+            eprintln!("\nEverything is installed.");
+            lines.say(format_args!("SETUP_DONE"));
+        } else {
+            eprintln!("\nTo download: {}", mb(total));
+        }
+        return Ok(0);
+    }
+    install_components(dir, &private_todo, &mut state, opts, &lines)?;
+    let removed = remove_private_copies(dir, &mut state, &r.packs);
+    if !removed.is_empty() {
+        eprintln!("  removed {} file(s) from this folder that the pack store now holds", removed.len());
+    }
+    state.store = Some(mode.clone());
+    save_state(dir, &state)?;
+    for k in &r.gc.deleted {
+        eprintln!("  pack store: removed {k} (no installed app uses it)");
+    }
     eprintln!("\nSetup complete. Try: mangajanai devices, then mangajanai init");
     lines.say(format_args!("SETUP_DONE"));
     Ok(0)
+}
+
+/// `setup --remove`: drop this app's ref from the pack store (its uninstaller runs this before
+/// deleting the folder), freeing the packs no other app uses. Nothing to do for a private install.
+fn remove(dir: &Path, store: Option<StoreMode>, lines: &Lines) -> Result<i32, String> {
+    let Some(mode) = store else {
+        eprintln!("Not a pack store install ({}): nothing to remove from the store.", dir.display());
+        lines.say(format_args!("SETUP_DONE"));
+        return Ok(0);
+    };
+    let s = store_open()?;
+    let (_, gc) = aji_runtime::unref(&s, &mode.app_id, &mut || eprintln!("  (waiting for another installer to finish with the pack store)"))
+        .map_err(|e| e.to_string())?;
+    for k in &gc.deleted {
+        eprintln!("  pack store: removed {k} (no installed app uses it)");
+    }
+    for k in &gc.in_use {
+        eprintln!("  pack store: kept {k} for now, it's in use");
+    }
+    let _ = std::fs::remove_file(dir.join("aji-runtime.json"));
+    let mut state = load_state(dir);
+    state.store = None;
+    save_state(dir, &state)?;
+    eprintln!("Removed {} from the pack store.", mode.app_id);
+    lines.say(format_args!("SETUP_DONE"));
+    Ok(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pack(name: &str, kind: &str, files: &[(&str, &[u8])]) -> (aji_runtime::IndexPack, PathBuf) {
+        let p = aji_runtime::IndexPack {
+            name: name.into(),
+            version: "1".into(),
+            kind: kind.into(),
+            sm: None,
+            asset: format!("{name}.7z"),
+            url: String::new(),
+            sha256: String::new(),
+            bytes: 0,
+            installed_bytes: 0,
+            files: files
+                .iter()
+                .map(|(n, d)| aji_runtime::PackFile { path: n.to_string(), sha256: sha256_bytes(d), bytes: d.len() as u64 })
+                .collect(),
+        };
+        (p, PathBuf::new())
+    }
+
+    fn installed(files: &[&str]) -> Installed {
+        Installed { version: "1".into(), sha256: "x".into(), files: files.iter().map(|f| f.to_string()).collect() }
+    }
+
+    #[test]
+    fn setup_json_without_store_still_reads_and_round_trips() {
+        let old: State = serde_json::from_str(r#"{"components":{"trt-runtime":{"version":"v","sha256":"s","files":["a.dll"]}}}"#).unwrap();
+        assert!(old.store.is_none());
+        assert!(!serde_json::to_string(&old).unwrap().contains("store"), "private installs write what they always did");
+        let mut s = old;
+        s.store = Some(StoreMode { app_id: "yosh-addon".into(), app_path: "C:/yosh/yosh.exe".into() });
+        let back: State = serde_json::from_slice(&serde_json::to_vec(&s).unwrap()).unwrap();
+        assert_eq!(back.store, s.store);
+    }
+
+    #[test]
+    fn libaji_files_are_recognised() {
+        for f in ["aji.dll", "aji_trtrtx.dll", "AJI_TRT.DLL", "libaji.so", "libaji_trt.so", "x/aji_dml.dll"] {
+            assert!(is_libaji(f), "{f}");
+        }
+        for f in ["nvinfer_11.dll", "tensorrt_rtx_1_7.dll", "models/aji.onnx", "cudart64_13.dll"] {
+            assert!(!is_libaji(f), "{f}");
+        }
+    }
+
+    #[test]
+    fn private_copies_go_once_the_store_has_them() {
+        let dir = std::env::temp_dir().join(format!("mangajanai-store-cleanup-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("models")).unwrap();
+        let w = |f: &str, d: &[u8]| std::fs::write(dir.join(f), d).unwrap();
+        w("nvinfer_11.dll", b"nv");
+        w("cudart64_13.dll", b"cu");
+        w("nvinfer_builder_resource_sm86_11.dll", b"sm86");
+        w("aji_trtrtx.dll", b"backend");
+        w("tensorrt_rtx_1_7.dll", b"rtx");
+        w("onnxruntime.dll", b"ort");
+        w("models/a.onnx", b"A");
+        w("models/b.onnx", b"B"); // untracked, identical to the store's
+        w("models/c.onnx", b"my own c"); // untracked, same name as a store file but different
+        w("models/mine.onnx", b"user model");
+        let mut state = State::default();
+        state.components.insert("trt-runtime".into(), installed(&["nvinfer_11.dll", "cudart64_13.dll"]));
+        state.components.insert("trt-sm86".into(), installed(&["nvinfer_builder_resource_sm86_11.dll"]));
+        state.components.insert("trt-rtx".into(), installed(&["aji_trtrtx.dll", "tensorrt_rtx_1_7.dll"]));
+        state.components.insert("dml-runtime".into(), installed(&["onnxruntime.dll"]));
+        state.components.insert("models-mangajanai".into(), installed(&["models/a.onnx"]));
+        let packs = vec![
+            pack("trt-runtime", "trt", &[("nvinfer_11.dll", b"nv")]),
+            pack("trtrtx-runtime", "trtrtx", &[("tensorrt_rtx_1_7.dll", b"rtx")]),
+            pack("models-mangajanai", "models", &[("a.onnx", b"A"), ("b.onnx", b"B"), ("c.onnx", b"C")]),
+        ];
+        let mut removed = remove_private_copies(&dir, &mut state, &packs);
+        removed.sort();
+        assert_eq!(
+            removed,
+            ["cudart64_13.dll", "models/a.onnx", "models/b.onnx", "nvinfer_11.dll", "nvinfer_builder_resource_sm86_11.dll", "tensorrt_rtx_1_7.dll"]
+        );
+        for kept in ["aji_trtrtx.dll", "onnxruntime.dll", "models/c.onnx", "models/mine.onnx"] {
+            assert!(dir.join(kept).is_file(), "{kept} must stay");
+        }
+        assert_eq!(state.components.keys().collect::<Vec<_>>(), ["dml-runtime"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn components_the_store_does_not_cover_stay() {
+        let dir = std::env::temp_dir().join(format!("mangajanai-store-keep-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("tensorrt_rtx_1_7.dll"), b"rtx").unwrap();
+        let mut state = State::default();
+        state.components.insert("trt-rtx".into(), installed(&["aji_trtrtx.dll", "tensorrt_rtx_1_7.dll"]));
+        state.components.insert("models-illustrationjanai-fp32".into(), installed(&["models/x.onnx"]));
+        // no TensorRT-RTX and no fp32 models in the store packs
+        let packs = vec![pack("trt-runtime", "trt", &[("nvinfer_11.dll", b"nv")])];
+        assert!(remove_private_copies(&dir, &mut state, &packs).is_empty());
+        assert!(dir.join("tensorrt_rtx_1_7.dll").is_file());
+        assert_eq!(state.components.len(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn store_wants_follow_the_gpus() {
+        let dir = std::env::temp_dir();
+        let g = |major, minor| nvml::Gpu { name: "g".into(), major, minor };
+        let w = store_wants(&dir, &[g(7, 0)], false).unwrap();
+        assert_eq!(w, ["trt", "models-mangajanai", "models-illustrationjanai", "models-illustrationjanai-fp32"]);
+        let w = store_wants(&dir, &[g(12, 0)], true).unwrap();
+        assert_eq!(w[0], "trt");
+        assert!(!w.iter().any(|x| x.starts_with("models-")));
+        if cfg!(windows) {
+            assert_eq!(store_wants(&dir, &[], true).unwrap(), Vec::<String>::new(), "DirectML only");
+        } else {
+            assert!(store_wants(&dir, &[], true).is_err());
+        }
+    }
 }

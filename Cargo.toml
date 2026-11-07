@@ -1,6 +1,6 @@
 [package]
 name = "mangajanai-cli"
-version = "0.6.0"
+version = "0.6.1"
 edition = "2024"
 description = "MangaJaNaiCLI: batch manga/image upscaling from the command line, and MangaJaNai GUI's upscaling backend, on yosh-image + libaji"
 repository = "https://github.com/the-database/MangaJaNaiCLI"

@@ -40,6 +40,7 @@ lossless = no
 ; Added to each file name: page01 -> page01_x4.webp. Leave empty for none.
 suffix =
 ; Or the whole file name, where %filename% is the original name (overrides suffix).
+; Files that would get the same name also get their own name added (upscaled-Vol 1.cbz).
 filename =
 ; Keep results that already exist instead of redoing them (yes or no).
 skip_existing = yes

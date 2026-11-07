@@ -43,8 +43,8 @@ dependencies = [
 
 [[package]]
 name = "aji-runtime"
-version = "0.1.0"
-source = "git+https://github.com/the-database/aji-runtime?rev=252c1a65e165d9bedcbfe10d6893484eb73291ca#252c1a65e165d9bedcbfe10d6893484eb73291ca"
+version = "0.1.1"
+source = "git+https://github.com/the-database/aji-runtime?rev=090015f26bcfb12e2ebbd40f4922c1afe4bf75f1#090015f26bcfb12e2ebbd40f4922c1afe4bf75f1"
 dependencies = [
  "libloading",
  "serde",

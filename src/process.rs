@@ -27,8 +27,9 @@ pub struct Work {
     pub h: u32,
     pub channels: u8,
     pub pixels: Vec<u8>,
-    /// The decoded size, before any resize: what the chain and the final size go by.
-    pub orig: (u32, u32),
+    /// The size the final size goes by: the decoded size, or the chain's pre-resized size (a
+    /// pre-resize says what the page's real resolution is, so 4x is 4x of that).
+    pub base: (u32, u32),
     pub chain: Option<Chain>,
 }
 
@@ -90,7 +91,7 @@ pub fn prepare(bytes: &[u8], job: &Job, name: &str, resizer: &mut Resizer) -> Re
             }
         }
     }
-    Ok(Work { w: cw, h: ch, channels, pixels, orig: (w, h), chain })
+    Ok(Work { w: cw, h: ch, channels, pixels, base: (cw, ch), chain })
 }
 
 /// Run the chain's model, if it has one.
@@ -119,9 +120,9 @@ pub fn infer(mut work: Work, up: &mut Upscaler) -> Result<Work, String> {
 /// Bring the image to its final size and encode it. Gray goes through the linear-light Dot Gain
 /// resize (screentone-safe), color through Lanczos3; alpha always through Lanczos3.
 pub fn finish(work: Work, job: &Job, resizer: &mut Resizer) -> Result<Vec<u8>, String> {
-    let Work { w, h, channels, mut pixels, orig, .. } = work;
+    let Work { w, h, channels, mut pixels, base, .. } = work;
     let (mut fw, mut fh) = (w, h);
-    if let Some((tw, th)) = chain::final_size(job.target, orig, (w, h)) {
+    if let Some((tw, th)) = chain::final_size(job.target, base, (w, h)) {
         pixels = match channels {
             1 => resize::gray_linear(&pixels, (w, h), (tw, th), resizer)?,
             2 => {
@@ -136,4 +137,36 @@ pub fn finish(work: Work, job: &Job, resizer: &mut Resizer) -> Result<Vec<u8>, S
         (fw, fh) = (tw, th);
     }
     encode::encode(&Out { w: fw, h: fh, channels, pixels }, job.format, job.quality, job.lossless)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn job(target: Target, pre_resize_height: i32) -> Job {
+        let chain = Chain {
+            is_grayscale: true,
+            is_color: true,
+            resize_height_before_upscale: Some(pre_resize_height),
+            model_file_path: "No Model".into(),
+            ..Chain::default()
+        };
+        Job { chains: vec![chain], threshold: 12, target, format: Format::Png, quality: 80, lossless: false }
+    }
+
+    fn size_after(job: &Job) -> (u32, u32) {
+        let page = Out { w: 400, h: 800, channels: 1, pixels: vec![128; 400 * 800] };
+        let bytes = encode::encode(&page, Format::Png, 80, false).unwrap();
+        let mut resizer = Resizer::new();
+        let work = prepare(&bytes, job, "page", &mut resizer).unwrap();
+        let out = decode::decode(&finish(work, job, &mut resizer).unwrap()).unwrap();
+        (out.w, out.h)
+    }
+
+    #[test]
+    fn scale_is_measured_from_the_pre_resized_size() {
+        assert_eq!(size_after(&job(Target::Scale(2.0), 400)), (400, 800), "2x of 200x400, not of 400x800");
+        assert_eq!(size_after(&job(Target::Scale(2.0), 0)), (800, 1600), "no pre-resize: 2x of the file");
+        assert_eq!(size_after(&job(Target::Height(1000), 400)), (500, 1000), "pixel targets don't change");
+    }
 }

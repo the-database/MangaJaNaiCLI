@@ -154,6 +154,26 @@ impl Format {
             Format::Jxl => "jxl",
         }
     }
+
+    /// The largest width or height the format can store, if it has a limit in reach.
+    pub fn max_side(self) -> Option<u32> {
+        match self {
+            Format::Webp => Some(16383),
+            Format::Jpeg => Some(65535),
+            Format::Avif => Some(65535),
+            Format::Png | Format::Jxl => None,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Format::Webp => "WebP",
+            Format::Png => "PNG",
+            Format::Avif => "AVIF",
+            Format::Jpeg => "JPEG",
+            Format::Jxl => "JPEG XL",
+        }
+    }
 }
 
 /// What the final image size is relative to.

@@ -75,18 +75,22 @@ fn jpeg(img: &Out, quality: u8) -> Result<Vec<u8>, String> {
     Ok(bytes)
 }
 
+const WEBP_MAX: u32 = 16383;
+
+/// `finish` shrinks images to fit; this is the backstop.
 fn webp(img: &Out, quality: u8, lossless: bool) -> Result<Vec<u8>, String> {
+    if img.w > WEBP_MAX || img.h > WEBP_MAX {
+        return Err(format!("webp: {}x{} is larger than WebP allows ({WEBP_MAX})", img.w, img.h));
+    }
     let (ch, data) = to_color(img);
     let enc = if ch == 4 {
         webp::Encoder::from_rgba(&data, img.w, img.h)
     } else {
         webp::Encoder::from_rgb(&data, img.w, img.h)
     };
-    let mem = if lossless {
-        enc.encode_lossless()
-    } else {
-        enc.encode(quality as f32)
-    };
+    // encode_simple, not encode/encode_lossless (the same settings), which panic on an error
+    let quality = if lossless { 75.0 } else { quality as f32 };
+    let mem = enc.encode_simple(lossless, quality).map_err(|e| format!("webp: {e:?}"))?;
     Ok(mem.to_vec())
 }
 
@@ -133,6 +137,21 @@ fn jxl(img: &Out, quality: u8, lossless: bool) -> Result<Vec<u8>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn webp_limit_matches_the_format() {
+        assert_eq!(Format::Webp.max_side(), Some(WEBP_MAX));
+    }
+
+    #[test]
+    fn too_large_for_webp_is_an_error() {
+        let img = Out { w: WEBP_MAX + 1, h: 1, channels: 1, pixels: vec![0; WEBP_MAX as usize + 1] };
+        let err = encode(&img, Format::Webp, 80, false).unwrap_err();
+        assert!(err.contains("larger than WebP allows"), "{err}");
+        let img = Out { w: WEBP_MAX, h: 1, channels: 1, pixels: vec![0; WEBP_MAX as usize] };
+        assert!(encode(&img, Format::Webp, 80, false).is_ok());
+        assert!(encode(&img, Format::Webp, 80, true).is_ok());
+    }
 
     fn img(channels: u8) -> Out {
         let (w, h) = (16u32, 8u32);

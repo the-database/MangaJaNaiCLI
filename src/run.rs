@@ -44,6 +44,17 @@ pub struct Output {
     /// The file name template; `%filename%` is the input's name without its extension.
     pub filename: String,
     pub overwrite: bool,
+    /// Outputs written at or after this are kept even when overwriting: a resumed run keeps what
+    /// the interrupted one already saved, and still redoes files that were there before it.
+    pub keep_since: Option<std::time::SystemTime>,
+}
+
+impl Output {
+    /// Whether the output at `path` is kept (not redone).
+    fn keeps(&self, path: &Path) -> bool {
+        let Ok(meta) = std::fs::metadata(path) else { return false };
+        !self.overwrite || self.keep_since.is_some_and(|since| meta.modified().is_ok_and(|m| m >= since))
+    }
 }
 
 impl Output {
@@ -191,7 +202,7 @@ impl Walker<'_> {
     }
 
     fn skip(&self, path: &Path) -> bool {
-        if !self.out.overwrite && path.exists() {
+        if self.out.keeps(path) {
             progress::skipped(path);
             return true;
         }
@@ -305,7 +316,7 @@ fn count(inputs: &[Planned], out: &Output) -> u64 {
     inputs
         .iter()
         .map(|p| {
-            if !out.overwrite && p.dest.exists() {
+            if out.keeps(&p.dest) {
                 0
             } else if p.is_archive {
                 archive::list(&p.src).map_or(0, |e| e.len() as u64)
@@ -400,12 +411,17 @@ fn part_path(path: &Path) -> PathBuf {
     PathBuf::from(p)
 }
 
+/// Written to `<name>.part`, flushed to disk, then renamed: an output under its real name is
+/// complete even after a power loss, so a rerun that keeps existing outputs never keeps a broken one
+/// (without the flush, the rename can reach the disk before the data).
 fn write_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
     let part = part_path(path);
-    std::fs::write(&part, bytes).map_err(|e| e.to_string())?;
+    let mut f = std::fs::File::create(&part).map_err(|e| e.to_string())?;
+    f.write_all(bytes).and_then(|_| f.sync_all()).map_err(|e| e.to_string())?;
+    drop(f);
     std::fs::rename(&part, path).map_err(|e| e.to_string())
 }
 
@@ -449,8 +465,11 @@ impl ArchiveOut {
         Ok(())
     }
 
+    /// Flushed to disk before the rename, as [`write_file`] does.
     fn finish(self) -> Result<(), String> {
-        self.zip.finish().map_err(|e| e.to_string())?;
+        let file = self.zip.finish().map_err(|e| e.to_string())?;
+        file.sync_all().map_err(|e| e.to_string())?;
+        drop(file);
         std::fs::rename(part_path(&self.out), &self.out).map_err(|e| e.to_string())
     }
 }
@@ -627,12 +646,32 @@ mod tests {
     use super::*;
 
     fn names(filename: &str, inputs: &[(&str, &str, bool)]) -> Vec<String> {
-        let out = Output { dir: "out".into(), filename: filename.into(), overwrite: true };
+        let out = Output { dir: "out".into(), filename: filename.into(), overwrite: true, keep_since: None };
         let raw = inputs.iter().map(|&(src, dir, a)| (PathBuf::from(src), PathBuf::from("out").join(dir), a, true)).collect();
         assign(raw, &out, "webp", false)
             .into_iter()
             .map(|p| p.dest.strip_prefix("out").unwrap().to_string_lossy().replace('\\', "/"))
             .collect()
+    }
+
+    #[test]
+    fn keep_since_keeps_only_outputs_written_since() {
+        let dir = std::env::temp_dir().join(format!("mangajanai-keep-since-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let old = dir.join("old.webp");
+        std::fs::write(&old, b"x").unwrap();
+        let since = std::fs::metadata(&old).unwrap().modified().unwrap() + std::time::Duration::from_secs(1);
+        let new = dir.join("new.webp");
+        std::fs::write(&new, b"x").unwrap();
+        std::fs::File::options().write(true).open(&new).unwrap().set_modified(since).unwrap();
+        let out = |overwrite, keep_since| Output { dir: dir.clone(), filename: "%filename%".into(), overwrite, keep_since };
+
+        assert!(!out(true, None).keeps(&new), "overwriting redoes everything");
+        assert!(out(true, Some(since)).keeps(&new), "written since: kept");
+        assert!(!out(true, Some(since)).keeps(&old), "there before the run: redone");
+        assert!(out(false, None).keeps(&old) && out(false, Some(since)).keeps(&old), "not overwriting keeps all");
+        assert!(!out(false, Some(since)).keeps(&dir.join("missing.webp")));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

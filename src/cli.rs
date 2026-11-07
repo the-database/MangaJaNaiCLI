@@ -56,6 +56,7 @@ Saving:
   --lossless                lossless webp or jxl
   --suffix <text>           appended to file names    --filename <template>   %filename% = input name
   --skip-existing           keep outputs that exist (default)    --overwrite   redo them
+  --skip-written-since <t>  also keep outputs written since t (Unix seconds): resume a run
 
 GPU:
   --backend <b>             auto (default) | tensorrt | directml | tensorrt-rtx
@@ -147,6 +148,7 @@ struct Flags {
     filename: Option<String>,
     suffix: Option<String>,
     skip_existing: Option<bool>,
+    keep_since: Option<std::time::SystemTime>,
     images: Option<bool>,
     archives: Option<bool>,
     gray_threshold: Option<i32>,
@@ -224,6 +226,10 @@ fn parse_flags(args: Vec<String>) -> Result<Flags, String> {
             "--suffix" => f.suffix = Some(value(&key)?),
             "--filename" => f.filename = Some(value(&key)?),
             "--skip-existing" => f.skip_existing = Some(true),
+            "--skip-written-since" => {
+                let secs: u64 = num(&key, &value(&key)?)?;
+                f.keep_since = Some(std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs));
+            }
             "--overwrite" => f.skip_existing = Some(false),
             "--no-images" => f.images = Some(false),
             "--no-archives" => f.archives = Some(false),
@@ -412,6 +418,7 @@ fn gui_run(flags: Flags) -> i32 {
         dir: wf.output_folder_path.clone().into(),
         filename: if wf.output_filename.is_empty() { "%filename%".into() } else { wf.output_filename.clone() },
         overwrite: wf.overwrite_existing_files,
+        keep_since: flags.keep_since,
     };
     let job = process::Job {
         chains: wf.chains.values.clone(),
@@ -679,7 +686,7 @@ fn resolve(flags: &Flags) -> Result<Plan, String> {
         .or(file.and_then(|f| f.save.skip_existing))
         .or(wf.as_ref().map(|w| !w.overwrite_existing_files))
         .unwrap_or(true);
-    let output = run::Output { dir, filename, overwrite: !skip };
+    let output = run::Output { dir, filename, overwrite: !skip, keep_since: flags.keep_since };
 
     // the job
     let file_target = match file {

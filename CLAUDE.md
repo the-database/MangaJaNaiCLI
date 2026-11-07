@@ -111,7 +111,8 @@ Releases before the move (0.1.x) are on the-database/yosh under `mangajanai-cli-
 A `v*` release asks yosh and MangaJaNai GUI to open PRs that pin it (`notify-downstream.yml`).
 Here, `bump-pins.yml` runs `scripts/bump_pins.py <source> <tag>` and opens a PR on `bump/<source>`
 for a libaji release (`libaji`, sent by animejanai-inference), the runtime packs
-(`runtime-packs`) and yosh-image (`yosh-image`, sent by a yosh release). The script downloads each
+(`runtime-packs`), yosh-image (`yosh-image`, sent by a yosh release) and the aji-runtime library's
+commit (`aji-runtime`, sent by an aji-runtime release). The script downloads each
 pinned asset for its SHA-256; run it locally to check a bump. Both workflows need the
 `JANAI_BUMP_TOKEN` secret.
 

@@ -41,7 +41,11 @@ jobs:
           echo "AJI_VERSION=$v" >> "$GITHUB_ENV"
 
       - uses: dtolnay/rust-toolchain@stable
+      # Keyed on libjxl's build settings: its build script (cmake crate) never reruns on its own, so
+      # a cache from before a change to them would keep the old libjxl.
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ hashFiles('.cargo/config.toml', 'cmake/*.cmake') }}
 
       # AVIF input decoding needs dav1d (C), built static from source (the recipe yosh's release.yml
       # uses): MSVC env, nasm, meson + ninja, pkg-config, then dav1d with /MT to match the

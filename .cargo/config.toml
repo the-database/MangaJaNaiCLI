@@ -1,0 +1,5 @@
+# Windows: link the C runtime statically, as the releases always have (release.yml also sets it).
+# libjxl (the `jxl` feature) is always built with /MT, so a /MD build (cargo's default) would fail
+# to link it.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

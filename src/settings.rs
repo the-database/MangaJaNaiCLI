@@ -249,6 +249,15 @@ mod tests {
     }
 
     #[test]
+    fn jxl_selected_picks_jxl() {
+        let w: Workflow = serde_json::from_str(r#"{"WebpSelected": false, "JxlSelected": true, "UseLosslessCompression": true}"#).unwrap();
+        assert_eq!(w.format(), Format::Jxl);
+        assert_eq!(w.format().ext(), "jxl");
+        let old: Workflow = serde_json::from_str(r#"{"WebpSelected": false, "AvifSelected": true}"#).unwrap();
+        assert_eq!(old.format(), Format::Avif, "a workflow without JxlSelected reads as before");
+    }
+
+    #[test]
     fn null_strings_read_as_empty() {
         let json = r#"{ "Workflows": { "$values": [ { "OutputFolderPath": null, "Chains": { "$values": [
             { "ModelFilePath": null, "ModelTileSize": null, "MinResolution": null } ] } } ] } }"#;

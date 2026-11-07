@@ -16,7 +16,7 @@ on:
       source:
         description: Which upstream to re-pin
         type: choice
-        options: [libaji, runtime-packs, yosh-image]
+        options: [libaji, runtime-packs, yosh-image, aji-runtime]
       tag:
         description: 'Release tag (v0.22.2, runtime-2); for yosh-image any yosh ref (a tag, main, a commit)'
         required: true

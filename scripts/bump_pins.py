@@ -9,6 +9,9 @@ Sources:
   yosh-image     a the-database/yosh ref (a release tag, a branch or a commit): the yosh-image
                  `rev` in Cargo.toml, and Cargo.lock (needs cargo). Skipped when nothing under
                  crates/yosh-image/ or the workspace Cargo.toml changed.
+  aji-runtime    a the-database/aji-runtime release tag (vX.Y.Z): the aji-runtime `rev` in
+                 Cargo.toml (the tag's commit; `setup --store` is built on it), and Cargo.lock
+                 (needs cargo).
 
 .github/workflows/bump-pins.yml runs this when an upstream release sends a repository_dispatch,
 then opens a PR; it also runs by hand. Each pinned asset is downloaded to record its SHA-256.
@@ -178,6 +181,8 @@ AJI_REPO = "the-database/animejanai-inference"
 AJI_VERSION = r'^const AJI_VERSION: &str = "([^"]+)";'
 RUNTIME_TAG = r'^const RUNTIME_TAG: &str = "([^"]+)";'
 YOSH_REV = r'^yosh-image = \{ git = "https://github\.com/the-database/yosh", rev = "([0-9a-f]{40})"'
+RUNTIME_REPO = "the-database/aji-runtime"
+RUNTIME_REV = r'^aji-runtime = \{ git = "https://github\.com/the-database/aji-runtime", rev = "([0-9a-f]{40})"'
 
 
 def bump_libaji(tag, changes, allow_downgrade):
@@ -255,7 +260,38 @@ def bump_yosh_image(ref, changes, allow_downgrade):
     return [f], f"Bump yosh-image to yosh {shown}", notes
 
 
-SOURCES = {"libaji": bump_libaji, "runtime-packs": bump_runtime, "yosh-image": bump_yosh_image}
+def bump_aji_runtime(tag, changes, allow_downgrade):
+    if not re.fullmatch(r"v\d+\.\d+\.\d+", tag):
+        raise Fail(f"{tag} isn't an aji-runtime release tag (vX.Y.Z)")
+    rel = release(RUNTIME_REPO, tag)
+    f = File("Cargo.toml", changes)
+    old = f.get("aji-runtime rev", RUNTIME_REV)
+    commit = gh(f"repos/{RUNTIME_REPO}/commits/{tag}")
+    if commit is None:
+        raise Fail(f"{RUNTIME_REPO} has no tag {tag}")
+    new = commit["sha"]
+    if new == old:
+        f.set("aji-runtime rev", RUNTIME_REV, new)
+        return [f], "", ""
+    cmp = gh(f"repos/{RUNTIME_REPO}/compare/{old}...{new}")
+    if cmp["status"] == "behind" and not allow_downgrade:
+        raise Fail(f"aji-runtime {tag} ({new[:10]}) is behind the pinned {old[:10]} (pass --allow-downgrade)")
+    f.set("aji-runtime rev", RUNTIME_REV, new)
+    f.save()
+    subprocess.run(["cargo", "update", "-p", "aji-runtime"], cwd=ROOT, check=True)
+    notes = (
+        f"Pins the pack store library to [aji-runtime {tag}]({rel['html_url']}) "
+        f"(commit [{new[:10]}](https://github.com/{RUNTIME_REPO}/commit/{new}), "
+        f"[changes](https://github.com/{RUNTIME_REPO}/compare/{old[:12]}...{new[:12]}), "
+        f"{cmp.get('ahead_by', '?')} commits). `mangajanai setup --store` is built on it. Cargo.lock "
+        "follows (`cargo update -p aji-runtime`). To test it, `cargo test` and run `setup --store` "
+        "against a test store (`AJI_RUNTIME_STORE=<dir>`)."
+    )
+    return [f], f"Bump aji-runtime to {tag}", notes
+
+
+SOURCES = {"libaji": bump_libaji, "runtime-packs": bump_runtime, "yosh-image": bump_yosh_image,
+           "aji-runtime": bump_aji_runtime}
 
 if __name__ == "__main__":
     run(SOURCES, "MangaJaNaiCLI")

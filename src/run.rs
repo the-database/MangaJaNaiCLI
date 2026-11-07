@@ -11,7 +11,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 
 use yosh_image::archive;
@@ -552,7 +552,73 @@ impl Sink {
 // ---- the run -------------------------------------------------------------------------------
 
 /// Opens one inference thread's upscaler (one GPU), or says why it couldn't.
-pub type OpenUpscaler = Box<dyn FnOnce() -> Result<Upscaler, String> + Send>;
+/// Opens one inference thread's upscaler (one GPU), or says why it couldn't. Called again after a
+/// pause, which closes it.
+pub type OpenUpscaler = Box<dyn Fn() -> Result<Upscaler, String> + Send>;
+
+/// Pausing a run (MangaJaNai GUI's Pause): each inference thread closes its upscaler (its models
+/// and the libaji context, so the GPU memory is freed) once it's done with the image it's on, and
+/// waits. Resuming opens it again when the next image needs it: its engines load from the cache,
+/// nothing is rebuilt. Decoding and encoding stop on their own once the queues between the stages
+/// are full. `PAUSED` is printed when every GPU has let go, `RESUMED` on resume.
+pub struct Pause {
+    state: Mutex<PauseState>,
+    cv: Condvar,
+}
+
+#[derive(Default)]
+struct PauseState {
+    paused: bool,
+    /// Inference threads holding nothing, waiting to resume.
+    released: usize,
+    threads: usize,
+}
+
+impl Pause {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self { state: Mutex::new(PauseState::default()), cv: Condvar::new() })
+    }
+
+    pub fn pause(&self) {
+        let mut s = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        if !s.paused {
+            s.paused = true;
+            if s.threads == 0 {
+                progress::paused(); // nothing on a GPU yet
+            }
+        }
+    }
+
+    pub fn resume(&self) {
+        let mut s = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        if s.paused {
+            s.paused = false;
+            s.released = 0;
+            self.cv.notify_all();
+            progress::resumed();
+        }
+    }
+
+    fn set_threads(&self, n: usize) {
+        self.state.lock().unwrap_or_else(|p| p.into_inner()).threads = n;
+    }
+
+    /// While paused: close `up`, then wait for the resume.
+    fn hold(&self, up: &mut Option<Upscaler>) {
+        let mut s = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        if !s.paused {
+            return;
+        }
+        *up = None;
+        s.released += 1;
+        if s.released == s.threads {
+            progress::paused();
+        }
+        while s.paused {
+            s = self.cv.wait(s).unwrap_or_else(|p| p.into_inner());
+        }
+    }
+}
 
 /// How many items `run` will write for these inputs (see [`count`]), for a progress bar.
 pub fn total(inputs: &[Input], output: &Output, job: &Job) -> u64 {
@@ -563,7 +629,7 @@ pub fn total(inputs: &[Input], output: &Output, job: &Job) -> u64 {
 /// Run the batch over `inputs`, in order. Each of `upscalers` (one per GPU) gets an inference
 /// thread that opens it lazily (so a run that needs no model never loads the runtime) and then takes
 /// prepared images as it frees up.
-pub fn run(inputs: Vec<Input>, output: Output, job: Job, upscalers: Vec<OpenUpscaler>) {
+pub fn run(inputs: Vec<Input>, output: Output, job: Job, upscalers: Vec<OpenUpscaler>, pause: Arc<Pause>) {
     let threads = thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
     let gpus = upscalers.len().max(1);
     let n = (threads / 2).clamp(2, 8).max(2 * gpus).min(threads.max(2));
@@ -579,18 +645,25 @@ pub fn run(inputs: Vec<Input>, output: Output, job: Job, upscalers: Vec<OpenUpsc
     let mut handles = workers(n, item_rx, prep_tx, move |item, r| prepare_stage(item, &j, r));
 
     let prep_rx = Arc::new(Mutex::new(prep_rx));
-    for open_upscaler in upscalers {
-        let (prep_rx, infer_tx) = (prep_rx.clone(), infer_tx.clone());
+    pause.set_threads(upscalers.len());
+    for open in upscalers {
+        let (prep_rx, infer_tx, pause) = (prep_rx.clone(), infer_tx.clone(), pause.clone());
         handles.push(thread::spawn(move || {
             let mut up: Option<Upscaler> = None;
             let mut up_err: Option<String> = None;
-            let mut open = Some(open_upscaler);
             loop {
-                let next = prep_rx.lock().unwrap_or_else(|p| p.into_inner()).recv();
-                let Ok(stage) = next else { break };
+                pause.hold(&mut up);
+                // waits in short steps, so a pause while idle still lets go of the GPU
+                let next = prep_rx.lock().unwrap_or_else(|p| p.into_inner()).recv_timeout(std::time::Duration::from_millis(200));
+                let stage = match next {
+                    Ok(stage) => stage,
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                };
                 if let Stage::Work { work, .. } = &stage
                     && needs_model(work)
-                    && let Some(open) = open.take()
+                    && up.is_none()
+                    && up_err.is_none()
                 {
                     match open() {
                         Ok(u) => {
@@ -644,6 +717,35 @@ fn needs_model(work: &Work) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_pause_waits_until_resumed_and_lets_go_of_the_upscaler() {
+        let pause = Pause::new();
+        pause.set_threads(1);
+        pause.hold(&mut None); // not paused: returns at once
+        pause.pause();
+        let p = pause.clone();
+        let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let d = done.clone();
+        let t = thread::spawn(move || {
+            p.hold(&mut None);
+            d.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+        // the thread lets go and waits
+        for _ in 0..100 {
+            if pause.state.lock().unwrap().released == 1 {
+                break;
+            }
+            thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(pause.state.lock().unwrap().released, 1);
+        assert!(!done.load(std::sync::atomic::Ordering::SeqCst), "still paused");
+        pause.resume();
+        t.join().unwrap();
+        assert!(done.load(std::sync::atomic::Ordering::SeqCst));
+        assert_eq!(pause.state.lock().unwrap().released, 0);
+        pause.resume(); // not paused: nothing
+    }
 
     fn names(filename: &str, inputs: &[(&str, &str, bool)]) -> Vec<String> {
         let out = Output { dir: "out".into(), filename: filename.into(), overwrite: true, keep_since: None };

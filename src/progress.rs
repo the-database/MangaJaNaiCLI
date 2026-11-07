@@ -214,6 +214,21 @@ pub fn backend_fallback(model: Option<&str>, why: &str) {
 
 /// A model's precision is suboptimal for the backend and GPU it runs on (`precision::hint`):
 /// printed once per model file, before it loads. The GUI shows it as a non-blocking notice.
+/// The run let go of the GPU after a pause request (`--control stdin`'s `PAUSE`).
+pub fn paused() {
+    match human() {
+        Some(mut h) => h.say("Paused: the models are unloaded"),
+        None => line("PAUSED"),
+    }
+}
+
+pub fn resumed() {
+    match human() {
+        Some(mut h) => h.say("Resumed"),
+        None => line("RESUMED"),
+    }
+}
+
 pub fn hint(model: &str, text: &str) {
     match human() {
         Some(mut h) => h.say(&format!("note: {model}: {text}")),

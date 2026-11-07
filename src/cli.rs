@@ -75,6 +75,7 @@ GPU:
 
 Output:
   -v, --verbose             every file and chain decision    --progress lines   the GUI's line protocol
+  --control stdin           PAUSE / RESUME lines on stdin unload the models and load them again
   -h, --help                -V, --version
 
 MangaJaNai GUI's interface (unchanged):
@@ -130,6 +131,7 @@ fn prog_name() -> String {
 struct Flags {
     // the GUI's interface
     settings: Option<PathBuf>,
+    control_stdin: bool,
     list_devices: bool,
     model_info: Option<PathBuf>,
     // the command line
@@ -195,6 +197,13 @@ fn parse_flags(args: Vec<String>) -> Result<Flags, String> {
         let mut value = |name: &str| inline.take().or_else(|| it.next()).ok_or_else(|| format!("{name} needs a value"));
         match key.as_str() {
             "--settings" => f.settings = Some(value(&key)?.into()),
+            "--control" => {
+                let v = value(&key)?;
+                if v != "stdin" {
+                    return Err(format!("--control {v}: only `stdin` is supported"));
+                }
+                f.control_stdin = true;
+            }
             "--list-devices" => f.list_devices = true,
             "--model-info" => f.model_info = Some(value(&key)?.into()),
             "-c" | "--config" => f.config = Some(value(&key)?.into()),
@@ -432,10 +441,29 @@ fn gui_run(flags: Flags) -> i32 {
     let start = Instant::now();
     let backend = flags.backend.unwrap_or(BackendChoice::Auto);
     let (aji_dir, cache_dir) = (flags.aji_dir.clone().unwrap_or_else(exe_dir), default_cache_dir(flags.cache_dir.clone()));
-    let open: run::OpenUpscaler = Box::new(move || Upscaler::open(&aji_dir, backend, device, cache_dir, models_dirs, None, false));
-    run::run(vec![input], output, job, vec![open]);
+    let open: run::OpenUpscaler = Box::new(move || Upscaler::open(&aji_dir, backend, device, cache_dir.clone(), models_dirs.clone(), None, false));
+    let pause = run::Pause::new();
+    if flags.control_stdin {
+        listen_for_pause(pause.clone());
+    }
+    run::run(vec![input], output, job, vec![open], pause);
     progress::finish(start.elapsed());
     0
+}
+
+/// `--control stdin`: `PAUSE` and `RESUME` lines on stdin pause and resume the run (MangaJaNai GUI's
+/// Pause button). Anything else, and the end of stdin, is ignored.
+fn listen_for_pause(pause: std::sync::Arc<run::Pause>) {
+    std::thread::spawn(move || {
+        for line in std::io::stdin().lines() {
+            let Ok(line) = line else { break };
+            match line.trim() {
+                "PAUSE" => pause.pause(),
+                "RESUME" => pause.resume(),
+                _ => {}
+            }
+        }
+    });
 }
 
 // ---- the command line ------------------------------------------------------------------------
@@ -817,11 +845,15 @@ fn upscale(flags: Flags) -> Result<i32, String> {
         .map(|id| {
             let (aji_dir, cache_dir, dirs, backend, overlap, even) =
                 (plan.aji_dir.clone(), plan.cache_dir.clone(), plan.models_dirs.clone(), plan.backend, plan.overlap, plan.even_tiles);
-            Box::new(move || Upscaler::open(&aji_dir, backend, id, cache_dir, dirs, overlap, even)) as run::OpenUpscaler
+            Box::new(move || Upscaler::open(&aji_dir, backend, id, cache_dir.clone(), dirs.clone(), overlap, even)) as run::OpenUpscaler
         })
         .collect();
     let start = Instant::now();
-    run::run(plan.inputs, plan.output, plan.job, openers);
+    let pause = run::Pause::new();
+    if flags.control_stdin {
+        listen_for_pause(pause.clone());
+    }
+    run::run(plan.inputs, plan.output, plan.job, openers, pause);
     let failed = progress::finish(start.elapsed());
     Ok(if failed > 0 { 1 } else { 0 })
 }

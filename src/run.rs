@@ -358,7 +358,7 @@ fn infer_stage(stage: Stage, up: &mut Option<Upscaler>, up_err: &Option<String>)
 
 fn finish_stage(stage: Stage, job: &Job, resizer: &mut Resizer) -> (u64, Done) {
     match stage {
-        Stage::Work { seq, label, dest, work, original } => match catch(|| process::finish(work, job, resizer)) {
+        Stage::Work { seq, label, dest, work, original } => match catch(|| process::finish(work, job, &label, resizer)) {
             Ok(bytes) => (seq, Done::Write { dest, bytes }),
             Err(err) => (seq, Done::Failed { label, dest, err, original }),
         },

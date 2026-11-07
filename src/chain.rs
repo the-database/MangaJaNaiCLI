@@ -16,6 +16,23 @@ pub fn required_scale(target: Target, (ow, oh): (u32, u32)) -> f64 {
     }
 }
 
+/// The most a width, height or fit target may enlarge an image. Pages need at most about 6x (a
+/// low-resolution scan going to a 4K display); an 800x59 banner needs 28x to be 1680 tall, which
+/// makes a 22780 px wide file (MangaJaNaiGUI#90). Past the models' own 4x this is the screentone-safe
+/// final resize, which is still better than a reader's own resize up to the display.
+pub const MAX_TARGET_SCALE: f64 = 8.0;
+
+/// `target` for an image of size `base`, with width, height and fit targets that would enlarge it
+/// more than [`MAX_TARGET_SCALE`] limited to that scale. Scale targets are the user's own factor.
+pub fn limit(target: Target, base: (u32, u32)) -> Target {
+    match target {
+        Target::Width(_) | Target::Height(_) | Target::Fit(..) if required_scale(target, base) > MAX_TARGET_SCALE => {
+            Target::Scale(MAX_TARGET_SCALE)
+        }
+        t => t,
+    }
+}
+
 /// `"WxH"` → (w, h); 0 means unbounded. Unparseable parts count as 0.
 fn parse_resolution(s: &str) -> (u32, u32) {
     let mut it = s.split('x').map(|p| p.trim().parse::<u32>().unwrap_or(0));
@@ -205,6 +222,22 @@ mod tests {
         assert_eq!(final_size(Target::Width(1600), (800, 1200), (1600, 2400)), None);
         // half-to-even rounding, like Python: 5 * 5 / 2 = 12.5 -> 12
         assert_eq!(final_size(Target::Height(5), (5, 2), (5, 2)), Some((12, 5)));
+    }
+
+    #[test]
+    fn size_targets_enlarge_at_most_8x() {
+        let h = Target::Height(1680);
+        assert_eq!(limit(h, (800, 59)), Target::Scale(8.0), "a banner");
+        assert_eq!(final_size(limit(h, (800, 59)), (800, 59), (3200, 236)), Some((6400, 472)));
+        assert_eq!(limit(h, (976, 1417)), h, "a page");
+        assert_eq!(limit(Target::Height(3840), (533, 800)), Target::Height(3840), "4.8x: a low-res scan to 4K");
+        assert_eq!(limit(Target::Height(1680), (100, 210)), Target::Height(1680), "exactly 8x");
+        assert_eq!(limit(Target::Width(1600), (800, 20000)), Target::Width(1600), "a webtoon strip: 2x");
+        assert_eq!(limit(Target::Fit(1200, 1600), (20, 20)), Target::Scale(8.0), "an icon in fit mode");
+        assert_eq!(limit(Target::Fit(3000, 1680), (800, 59)), Target::Fit(3000, 1680), "fit bounds the banner by width: 3.75x");
+        assert_eq!(limit(Target::Scale(10.0), (800, 59)), Target::Scale(10.0), "a scale is the user's own");
+        assert_eq!(limit(Target::Native, (800, 59)), Target::Native);
+        assert_eq!(required_scale(limit(h, (800, 59)), (800, 59)), 8.0, "and the chain is picked for 8x");
     }
 
     #[test]

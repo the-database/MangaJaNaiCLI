@@ -51,9 +51,16 @@ pub fn prepare(bytes: &[u8], job: &Job, name: &str, resizer: &mut Resizer) -> Re
     let stored_gray = img.channels == 1;
     let opaque = stored_gray || is_opaque(&img.pixels);
     let gray = stored_gray || is_grayscale(&img.pixels, job.threshold);
-    let scale = chain::required_scale(job.target, (w, h));
+    let target = chain::limit(job.target, (w, h));
+    let scale = chain::required_scale(target, (w, h));
     let chain = chain::select(&job.chains, (w, h), gray, scale).cloned();
-    let scale_s = if job.target == Target::Native { "model scale".to_string() } else { format!("{scale:.3}x") };
+    let scale_s = if job.target == Target::Native {
+        "model scale".to_string()
+    } else if target != job.target {
+        format!("{:.3}x, limited to {scale}x", chain::required_scale(job.target, (w, h)))
+    } else {
+        format!("{scale:.3}x")
+    };
     match &chain {
         Some(c) => crate::progress::log(&format!("{name}: {w}x{h} {}, {scale_s}, {}", if gray { "gray" } else { "color" }, describe(c))),
         None => crate::progress::log(&format!("{name}: {w}x{h} {}, no chain matches; resizing only", if gray { "gray" } else { "color" })),
@@ -119,12 +126,37 @@ pub fn infer(mut work: Work, up: &mut Upscaler) -> Result<Work, String> {
     Ok(work)
 }
 
+/// `(w, h)` shrunk to fit `max` on both sides, keeping its shape, if it doesn't fit.
+fn fit_within((w, h): (u32, u32), max: Option<u32>) -> Option<(u32, u32)> {
+    let max = max?;
+    if w <= max && h <= max {
+        return None;
+    }
+    let s = max as f64 / w.max(h) as f64;
+    let side = |v: u32| ((v as f64 * s).round() as u32).clamp(1, max);
+    Some((side(w), side(h)))
+}
+
 /// Bring the image to its final size and encode it. Gray goes through the linear-light Dot Gain
-/// resize (screentone-safe), color through Lanczos3; alpha always through Lanczos3.
-pub fn finish(work: Work, job: &Job, resizer: &mut Resizer) -> Result<Vec<u8>, String> {
+/// resize (screentone-safe), color through Lanczos3; alpha always through Lanczos3. An image larger
+/// than the format can store is shrunk to fit it.
+pub fn finish(work: Work, job: &Job, name: &str, resizer: &mut Resizer) -> Result<Vec<u8>, String> {
     let Work { w, h, channels, mut pixels, base, .. } = work;
     let (mut fw, mut fh) = (w, h);
-    if let Some((tw, th)) = chain::final_size(job.target, base, (w, h)) {
+    // the 8x limit goes by the size the final size is measured from (the pre-resized size, if any)
+    let wanted = chain::final_size(chain::limit(job.target, base), base, (w, h));
+    let size = wanted.unwrap_or((w, h));
+    let fitted = fit_within(size, job.format.max_side());
+    if let Some((tw, th)) = fitted {
+        crate::progress::log(&format!(
+            "{name}: {}x{} is larger than {} allows ({} px a side); saved at {tw}x{th} (PNG and JPEG XL keep the full size)",
+            size.0,
+            size.1,
+            job.format.name(),
+            job.format.max_side().unwrap_or(0)
+        ));
+    }
+    if let Some((tw, th)) = fitted.or(wanted) {
         pixels = match channels {
             1 => resize::gray_linear(&pixels, (w, h), (tw, th), resizer)?,
             2 => {
@@ -157,11 +189,15 @@ mod tests {
     }
 
     fn size_after(job: &Job) -> (u32, u32) {
-        let page = Out { w: 400, h: 800, channels: 1, pixels: vec![128; 400 * 800] };
+        size_of(job, (400, 800))
+    }
+
+    fn size_of(job: &Job, (w, h): (u32, u32)) -> (u32, u32) {
+        let page = Out { w, h, channels: 1, pixels: vec![128; (w * h) as usize] };
         let bytes = encode::encode(&page, Format::Png, 80, false).unwrap();
         let mut resizer = Resizer::new();
         let work = prepare(&bytes, job, "page", &mut resizer).unwrap();
-        let out = decode::decode(&finish(work, job, &mut resizer).unwrap()).unwrap();
+        let out = decode::decode(&finish(work, job, "page", &mut resizer).unwrap()).unwrap();
         (out.w, out.h)
     }
 
@@ -170,5 +206,25 @@ mod tests {
         assert_eq!(size_after(&job(Target::Scale(2.0), 400)), (400, 800), "2x of 200x400, not of 400x800");
         assert_eq!(size_after(&job(Target::Scale(2.0), 0)), (800, 1600), "no pre-resize: 2x of the file");
         assert_eq!(size_after(&job(Target::Height(1000), 400)), (500, 1000), "pixel targets don't change");
+    }
+
+    #[test]
+    fn a_banner_is_enlarged_at_most_8x() {
+        let j = job(Target::Height(1680), 0);
+        assert_eq!(size_of(&j, (800, 59)), (6400, 472), "not 22780x1680");
+        assert_eq!(size_of(&j, (976, 1417)), (1157, 1680), "a page reaches the target");
+        // with a pre-resize the limit goes by the pre-resized size, like the final size does
+        assert_eq!(size_of(&job(Target::Height(1680), 100), (400, 800)), (400, 800), "100 tall needs 16.8x: 8x of 50x100");
+    }
+
+    #[test]
+    fn too_large_for_the_format_is_shrunk_to_fit() {
+        assert_eq!(fit_within((21000, 1680), Some(16383)), Some((16383, 1311)));
+        assert_eq!(fit_within((800, 20000), Some(16383)), Some((655, 16383)));
+        assert_eq!(fit_within((16383, 16383), Some(16383)), None);
+        assert_eq!(fit_within((100000, 5), None), None);
+        let mut j = job(Target::Scale(1.0), 0);
+        j.format = Format::Webp;
+        assert_eq!(size_of(&j, (16384, 2)), (16383, 2), "an image already past the limit, with no resize wanted");
     }
 }

@@ -72,6 +72,8 @@ pub fn prepare(bytes: &[u8], job: &Job, name: &str, resizer: &mut Resizer) -> Re
 
     if let Some(c) = &chain {
         if let Some((tw, th)) = chain::pre_resize(c, (w, h)) {
+            // Lanczos, not the Dot Gain resize the final step uses for gray pages: the MangaJaNai
+            // models are trained on this kind of downscale, so they do better with it.
             pixels = resize::lanczos(&pixels, channels, (w, h), (tw, th), resizer)?;
             (cw, ch) = (tw, th);
         }

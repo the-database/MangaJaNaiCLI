@@ -32,6 +32,7 @@ pub struct Workflow {
     pub webp_selected: bool,
     pub png_selected: bool,
     pub avif_selected: bool,
+    pub jxl_selected: bool,
     pub grayscale_detection_threshold: i32,
     pub mode_scale_selected: bool,
     pub upscale_scale_factor: i32,
@@ -64,6 +65,7 @@ impl Default for Workflow {
             webp_selected: true,
             png_selected: false,
             avif_selected: false,
+            jxl_selected: false,
             grayscale_detection_threshold: 12,
             mode_scale_selected: true,
             upscale_scale_factor: 4,
@@ -138,6 +140,7 @@ pub enum Format {
     Png,
     Avif,
     Jpeg,
+    Jxl,
 }
 
 impl Format {
@@ -148,6 +151,7 @@ impl Format {
             Format::Png => "png",
             Format::Avif => "avif",
             Format::Jpeg => "jpeg",
+            Format::Jxl => "jxl",
         }
     }
 }
@@ -172,6 +176,8 @@ impl Workflow {
             Format::Png
         } else if self.avif_selected {
             Format::Avif
+        } else if self.jxl_selected {
+            Format::Jxl
         } else {
             Format::Jpeg
         }

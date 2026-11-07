@@ -3,3 +3,7 @@
 # to link it.
 [target.x86_64-pc-windows-msvc]
 rustflags = ["-C", "target-feature=+crt-static"]
+
+# Windows: libjxl's CMake build gets its optimization flags back (see the file).
+[env]
+CMAKE_TOOLCHAIN_FILE_x86_64_pc_windows_msvc = { value = "cmake/windows-release-flags.cmake", relative = true }

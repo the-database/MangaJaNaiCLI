@@ -411,12 +411,17 @@ fn part_path(path: &Path) -> PathBuf {
     PathBuf::from(p)
 }
 
+/// Written to `<name>.part`, flushed to disk, then renamed: an output under its real name is
+/// complete even after a power loss, so a rerun that keeps existing outputs never keeps a broken one
+/// (without the flush, the rename can reach the disk before the data).
 fn write_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
     let part = part_path(path);
-    std::fs::write(&part, bytes).map_err(|e| e.to_string())?;
+    let mut f = std::fs::File::create(&part).map_err(|e| e.to_string())?;
+    f.write_all(bytes).and_then(|_| f.sync_all()).map_err(|e| e.to_string())?;
+    drop(f);
     std::fs::rename(&part, path).map_err(|e| e.to_string())
 }
 
@@ -460,8 +465,11 @@ impl ArchiveOut {
         Ok(())
     }
 
+    /// Flushed to disk before the rename, as [`write_file`] does.
     fn finish(self) -> Result<(), String> {
-        self.zip.finish().map_err(|e| e.to_string())?;
+        let file = self.zip.finish().map_err(|e| e.to_string())?;
+        file.sync_all().map_err(|e| e.to_string())?;
+        drop(file);
         std::fs::rename(part_path(&self.out), &self.out).map_err(|e| e.to_string())
     }
 }

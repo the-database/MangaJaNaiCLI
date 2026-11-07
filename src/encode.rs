@@ -1,4 +1,4 @@
-//! Output encoding: WebP (lossy or lossless), PNG, JPEG and AVIF, from 8-bit interleaved pixels
+//! Output encoding: WebP and JPEG XL (lossy or lossless), PNG, JPEG and AVIF, from 8-bit interleaved pixels
 //! with 1 (gray), 2 (gray + alpha), 3 (RGB) or 4 (RGBA) channels.
 
 use crate::settings::Format;
@@ -17,6 +17,10 @@ pub fn encode(img: &Out, format: Format, quality: u8, lossless: bool) -> Result<
         Format::Jpeg => jpeg(img, quality),
         Format::Webp => webp(img, quality, lossless),
         Format::Avif => avif(img, quality),
+        #[cfg(feature = "jxl")]
+        Format::Jxl => jxl(img, quality, lossless),
+        #[cfg(not(feature = "jxl"))]
+        Format::Jxl => Err("jxl: this build has no JPEG XL encoder (built without the `jxl` feature)".into()),
     }
 }
 
@@ -101,6 +105,31 @@ fn avif(img: &Out, quality: u8) -> Result<Vec<u8>, String> {
     res.map(|r| r.avif_file).map_err(|e| format!("avif: {e}"))
 }
 
+/// JPEG XL through libjxl, one thread per image (the batch already encodes several at once).
+/// Gray stays one channel and alpha is kept. `quality` maps to libjxl's distance as cjxl's -q
+/// does; `lossless` is true lossless, which needs the original (sRGB) profile instead of XYB.
+///
+/// Effort (libjxl's default is 7), measured on upscaled manga pages (3000x4500 gray and color,
+/// 1520x2400), one thread per page: lossy, effort 5 matches effort 7 in size and SSIMULACRA2 (within
+/// 0.2) at half the time (about 1.2 s vs 2.3 s a page), and beats WebP at the same quality number
+/// (q80: 3% smaller, +1.5 SSIMULACRA2); effort 3 is 5x faster but worse than WebP. Lossless,
+/// effort 7 is 9% smaller than effort 5 (and than lossless WebP) for 1.8x the time.
+#[cfg(feature = "jxl")]
+fn jxl(img: &Out, quality: u8, lossless: bool) -> Result<Vec<u8>, String> {
+    use jpegxl_rs::encode::{ColorEncoding, EncoderFrame, EncoderSpeed};
+    let mut enc = jpegxl_rs::encoder_builder()
+        .has_alpha(img.channels % 2 == 0)
+        .color_encoding(if img.channels <= 2 { ColorEncoding::SrgbLuma } else { ColorEncoding::Srgb })
+        .lossless(lossless)
+        .uses_original_profile(lossless)
+        .speed(if lossless { EncoderSpeed::Squirrel } else { EncoderSpeed::Hare })
+        .jpeg_quality(quality as f32)
+        .build()
+        .map_err(|e| format!("jxl: {e}"))?;
+    let frame = EncoderFrame::new(&img.pixels[..]).num_channels(img.channels as u32);
+    enc.encode_frame(&frame, img.w, img.h).map_err(|e| format!("jxl: {e}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -123,6 +152,30 @@ mod tests {
             assert!(&encode(&i, Format::Webp, 80, false).unwrap()[8..12] == b"WEBP");
             assert!(&encode(&i, Format::Webp, 80, true).unwrap()[8..12] == b"WEBP");
             assert!(&encode(&i, Format::Avif, 80, false).unwrap()[4..8] == b"ftyp");
+            #[cfg(feature = "jxl")]
+            for lossless in [false, true] {
+                let jxl = encode(&i, Format::Jxl, 80, lossless).unwrap();
+                assert!(yosh_image::decode::is_jxl(&jxl));
+                let d = yosh_image::decode::decode(&jxl).unwrap();
+                assert_eq!((d.w, d.h), (16, 8));
+            }
+        }
+    }
+
+    /// yosh-image decodes gray as 1 channel and color (with or without alpha) as RGBA.
+    #[cfg(feature = "jxl")]
+    #[test]
+    fn lossless_jxl_round_trips_exactly() {
+        let gray = img(1);
+        let d = yosh_image::decode::decode(&encode(&gray, Format::Jxl, 80, true).unwrap()).unwrap();
+        assert_eq!((d.channels, &d.pixels), (1, &gray.pixels));
+        for ch in [3, 4] {
+            let i = img(ch);
+            let d = yosh_image::decode::decode(&encode(&i, Format::Jxl, 80, true).unwrap()).unwrap();
+            assert_eq!(d.channels, 4);
+            let opaque = |p: &[u8]| if ch == 4 { p.to_vec() } else { vec![p[0], p[1], p[2], 255] };
+            let want: Vec<u8> = i.pixels.chunks_exact(ch as usize).flat_map(opaque).collect();
+            assert_eq!(d.pixels, want, "{ch} channels");
         }
     }
 

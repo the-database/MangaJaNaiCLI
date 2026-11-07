@@ -1,0 +1,9 @@
+# Windows: link the C runtime statically, as the releases always have (release.yml also sets it).
+# libjxl (the `jxl` feature) is always built with /MT, so a /MD build (cargo's default) would fail
+# to link it.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
+
+# Windows: libjxl's CMake build gets its optimization flags back (see the file).
+[env]
+CMAKE_TOOLCHAIN_FILE_x86_64_pc_windows_msvc = { value = "cmake/windows-release-flags.cmake", relative = true }

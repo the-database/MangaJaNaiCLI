@@ -52,8 +52,8 @@ Size (default: the model's own scale):
   -u, --upscale-factor <x>  same as --scale
 
 Saving:
-  --format webp|png|jpg|avif   (default webp)    -q, --quality <0-100>   (default 80)
-  --lossless                lossless webp
+  --format webp|png|jpg|avif|jxl   (default webp)    -q, --quality <0-100>   (default 80)
+  --lossless                lossless webp or jxl
   --suffix <text>           appended to file names    --filename <template>   %filename% = input name
   --skip-existing           keep outputs that exist (default)    --overwrite   redo them
 

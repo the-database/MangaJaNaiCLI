@@ -16,7 +16,8 @@ The command is `mangajanai`. The same program is MangaJaNai GUI's upscaling back
   order) and folders (recursive; the output keeps the subfolders).
 - One model for everything, MangaJaNai's per-page rules (gray pages by height, color pages), your own
   rules, or a workflow exported from MangaJaNai GUI.
-- Resize after the model to a scale, width, height or a box; webp (lossy/lossless), png, jpg, avif.
+- Resize after the model to a scale, width, height or a box; webp or jxl (lossy/lossless), png, jpg,
+  avif.
 - Transparency: uniform alpha is kept as is; varying alpha is recovered with the black/white two-pass
   trick, denoised and un-premultiplied.
 - Engines are built once per model, tile size and GPU, and cached. Several GPUs, or several streams on
@@ -135,11 +136,14 @@ Not carried over: URL inputs, DDS inputs, and the VRAM monitor.
 ```sh
 cargo build --release                  # target/release/mangajanai(.exe) and mangajanai_upscale(.exe)
 cargo build --release --features avif  # with AVIF input decoding (needs nasm + dav1d, as CI builds it)
+cargo build --release --no-default-features  # without JPEG XL output (no CMake or clang-cl needed)
 cargo test
 ```
 
-The only C dependencies are libwebp and UnRAR, built from source by their crates (a C/C++ compiler is
-needed). libaji is loaded at run time, so building needs no CUDA or TensorRT.
+The C/C++ dependencies are libwebp, UnRAR and libjxl, built from source by their crates (a C/C++
+compiler is needed). libjxl (JPEG XL output, the default `jxl` feature) also needs CMake and, on
+Windows, clang-cl: the Visual Studio component "C++ Clang tools for Windows". libaji is loaded at run
+time, so building needs no CUDA or TensorRT.
 
 ## Related projects
 - [mpv-AnimeJaNai](https://github.com/the-database/mpv-AnimeJaNai): Real-time anime upscaling in mpv

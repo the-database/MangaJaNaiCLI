@@ -24,6 +24,11 @@ path = "src/bin/mangajanai.rs"
 # AVIF input decoding (dav1d, a C library: needs nasm + meson, as CI builds it). Release builds
 # enable it; default builds stay free of it.
 avif = ["yosh-image/avif"]
+# JPEG XL output through libjxl (C++, built from source with CMake; on Windows also clang-cl, the
+# Visual Studio component "C++ Clang tools for Windows", which the GitHub runners have). On by
+# default; --no-default-features builds without it, and `--format jxl` then fails with a message.
+jxl = ["dep:jpegxl-rs"]
+default = ["jxl"]
 
 [dependencies]
 # yosh's imaging core (decoders, archives, resizing, the libaji bindings), pinned to a commit of
@@ -32,12 +37,13 @@ yosh-image = { git = "https://github.com/the-database/yosh", rev = "18128a677832
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 zip = "9"
-# Encoders. libwebp (C, through the `webp` crate's bundled build) is the one C dependency; AVIF goes
-# through ravif/rav1e without its assembly (no nasm needed).
+# Encoders. libwebp (C, through the `webp` crate's bundled build) and libjxl (C++, the `jxl` feature)
+# are the C dependencies; AVIF goes through ravif/rav1e without its assembly (no nasm needed).
 png = "0.18"
 jpeg-encoder = "0.7.1"
 webp = "0.3.1"
 ravif = { version = "0.13.0", default-features = false, features = ["threading"] }
+jpegxl-rs = { version = "0.16.0", default-features = false, features = ["vendored"], optional = true }
 # `mangajanai setup`: HTTPS downloads (ureq over rustls, as yosh's self-update), SHA-256 checks, the
 # 7z packs (sevenz-rust2, the decoder yosh-image already uses) and NVML for GPU detection.
 ureq = "3"

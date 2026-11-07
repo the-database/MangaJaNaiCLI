@@ -31,11 +31,11 @@ archives = yes
 [output]
 ; Where the results go. Archives come out as .cbz, folders keep their subfolders.
 folder = out
-; webp, png, jpg or avif
+; webp, png, jpg, avif or jxl
 format = webp
-; Lossy quality, 0-100 (webp, jpg, avif).
+; Lossy quality, 0-100 (webp, jpg, avif, jxl).
 quality = 90
-; Lossless webp (yes or no).
+; Lossless webp or jxl (yes or no).
 lossless = no
 ; Added to each file name: page01 -> page01_x4.webp. Leave empty for none.
 suffix =
@@ -482,7 +482,8 @@ pub fn parse_format(s: &str) -> Result<Format, String> {
         "png" => Ok(Format::Png),
         "jpg" | "jpeg" => Ok(Format::Jpeg),
         "avif" => Ok(Format::Avif),
-        _ => Err(format!("format should be webp, png, jpg or avif, not '{s}'")),
+        "jxl" => Ok(Format::Jxl),
+        _ => Err(format!("format should be webp, png, jpg, avif or jxl, not '{s}'")),
     }
 }
 
@@ -563,7 +564,7 @@ mod tests {
         assert!(err("quality = 3").contains("before any [section]"));
         assert!(err("[output]\nlossless = maybe").contains("yes or no"));
         assert!(err("[output]\nquality = high").contains("line 2"));
-        assert!(err("[output]\nformat = gif").contains("webp, png, jpg or avif"));
+        assert!(err("[output]\nformat = gif").contains("webp, png, jpg, avif or jxl"));
         assert!(err("[output]\nformat = png\nformat = jpg").contains("set twice"));
         assert!(err("[output]\n[output]").contains("appears twice"));
         assert!(err("[model]\nfile = a.onnx\npreset = manga").contains("pick one"));

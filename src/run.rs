@@ -7,7 +7,7 @@
 //! counted as done, an archive entry that can't be decoded is copied as-is, and every output is
 //! written under a temporary name and renamed into place only when complete.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
@@ -48,9 +48,86 @@ pub struct Output {
 
 impl Output {
     fn name_for(&self, input: &Path, ext: &str) -> String {
-        let stem = input.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-        format!("{}.{ext}", self.filename.replace("%filename%", &stem))
+        render(&self.filename, input, ext)
     }
+}
+
+fn render(template: &str, input: &Path, ext: &str) -> String {
+    let stem = input.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+    format!("{}.{ext}", template.replace("%filename%", &stem))
+}
+
+/// One input and the file it's written to.
+struct Planned {
+    src: PathBuf,
+    dest: PathBuf,
+    is_archive: bool,
+    /// Came from a folder walk (picks the progress line).
+    folder: bool,
+}
+
+/// Paths compare without case on Windows and macOS, whose file systems ignore it.
+fn path_key(p: &Path) -> String {
+    let s = p.to_string_lossy();
+    if cfg!(any(windows, target_os = "macos")) { s.to_lowercase() } else { s.into_owned() }
+}
+
+/// Which of `dests` share their path with another.
+fn colliding(dests: &[PathBuf]) -> Vec<bool> {
+    let mut n: HashMap<String, usize> = HashMap::new();
+    for d in dests {
+        *n.entry(path_key(d)).or_default() += 1;
+    }
+    dests.iter().map(|d| n[&path_key(d)] > 1).collect()
+}
+
+/// Each input's output file. Inputs that would be written to the same file (a name without
+/// `%filename%` in a folder, or `a.cbz` and `a.zip`) are told apart, and only those: first by
+/// adding `-%filename%` to a name without it, then by adding the input's extension (`a-zip.cbz`),
+/// then by a number.
+fn assign(raw: Vec<(PathBuf, PathBuf, bool, bool)>, out: &Output, format_ext: &str, report: bool) -> Vec<Planned> {
+    let ext = |is_archive: bool| if is_archive { "cbz" } else { format_ext };
+    let first: Vec<PathBuf> = raw.iter().map(|(src, dir, a, _)| dir.join(out.name_for(src, ext(*a)))).collect();
+    let mut dests = first.clone();
+
+    let template = if out.filename.contains("%filename%") { out.filename.clone() } else { format!("{}-%filename%", out.filename) };
+    for (i, c) in colliding(&dests).into_iter().enumerate() {
+        if c {
+            let (src, dir, a, _) = &raw[i];
+            dests[i] = dir.join(render(&template, src, ext(*a)));
+        }
+    }
+    for (i, c) in colliding(&dests).into_iter().enumerate() {
+        if c {
+            let (src, dir, a, _) = &raw[i];
+            let src_ext = src.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
+            dests[i] = dir.join(render(&format!("{template}-{src_ext}"), src, ext(*a)));
+        }
+    }
+    let mut used = HashSet::new();
+    for d in dests.iter_mut() {
+        let base = d.clone();
+        let stem = base.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+        let e = base.extension().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+        let mut n = 2;
+        while !used.insert(path_key(d)) {
+            *d = base.with_file_name(format!("{stem}-{n}.{e}"));
+            n += 1;
+        }
+    }
+
+    let renamed: Vec<&PathBuf> = first.iter().zip(&dests).filter(|(a, b)| a != b).map(|(_, b)| b).collect();
+    if report && let Some(example) = renamed.first() {
+        progress::log(&format!(
+            "{} inputs would have been saved over each other, so their output names were made unique (for example {})",
+            renamed.len(),
+            example.display()
+        ));
+    }
+    raw.into_iter()
+        .zip(dests)
+        .map(|((src, _, is_archive, folder), dest)| Planned { src, dest, is_archive, folder })
+        .collect()
 }
 
 // ---- items through the pipeline ------------------------------------------------------------
@@ -121,8 +198,8 @@ impl Walker<'_> {
         false
     }
 
-    fn image(&mut self, src: &Path, out_dir: &Path, format_ext: &str, folder: bool) -> bool {
-        let dest = out_dir.join(self.out.name_for(src, format_ext));
+    fn image(&mut self, src: &Path, dest: &Path, folder: bool) -> bool {
+        let dest = dest.to_path_buf();
         if self.skip(&dest) {
             return true;
         }
@@ -130,8 +207,8 @@ impl Walker<'_> {
         self.send(Item::Image { seq, label: src.display().to_string(), src: Src::Path(src.to_path_buf()), dest: Dest::File { path: dest, folder } })
     }
 
-    fn archive(&mut self, src: &Path, out_dir: &Path, format_ext: &str) -> bool {
-        let dest = out_dir.join(self.out.name_for(src, "cbz"));
+    fn archive(&mut self, src: &Path, dest: &Path, format_ext: &str) -> bool {
+        let dest = dest.to_path_buf();
         if self.skip(&dest) {
             return true;
         }
@@ -212,10 +289,10 @@ fn plan(input: &Input, out: &Output, report: bool) -> Vec<(PathBuf, PathBuf, boo
     }
 }
 
-fn walk(inputs: &[(PathBuf, PathBuf, bool, bool)], out: &Output, format_ext: &str, tx: SyncSender<Item>) {
+fn walk(inputs: &[Planned], out: &Output, format_ext: &str, tx: SyncSender<Item>) {
     let mut w = Walker { tx, seq: 0, out };
-    for (src, out_dir, is_archive, folder) in inputs {
-        let alive = if *is_archive { w.archive(src, out_dir, format_ext) } else { w.image(src, out_dir, format_ext, *folder) };
+    for p in inputs {
+        let alive = if p.is_archive { w.archive(&p.src, &p.dest, format_ext) } else { w.image(&p.src, &p.dest, p.folder) };
         if !alive {
             return;
         }
@@ -224,15 +301,14 @@ fn walk(inputs: &[(PathBuf, PathBuf, bool, bool)], out: &Output, format_ext: &st
 
 /// How many items (images and archive entries) the run will write, for the progress bar: what
 /// `walk` sends, without reading any image (archives only list their entries).
-fn count(inputs: &[(PathBuf, PathBuf, bool, bool)], out: &Output, format_ext: &str) -> u64 {
+fn count(inputs: &[Planned], out: &Output) -> u64 {
     inputs
         .iter()
-        .map(|(src, out_dir, is_archive, _)| {
-            let ext = if *is_archive { "cbz" } else { format_ext };
-            if !out.overwrite && out_dir.join(out.name_for(src, ext)).exists() {
+        .map(|p| {
+            if !out.overwrite && p.dest.exists() {
                 0
-            } else if *is_archive {
-                archive::list(src).map_or(0, |e| e.len() as u64)
+            } else if p.is_archive {
+                archive::list(&p.src).map_or(0, |e| e.len() as u64)
             } else {
                 1
             }
@@ -461,8 +537,8 @@ pub type OpenUpscaler = Box<dyn FnOnce() -> Result<Upscaler, String> + Send>;
 
 /// How many items `run` will write for these inputs (see [`count`]), for a progress bar.
 pub fn total(inputs: &[Input], output: &Output, job: &Job) -> u64 {
-    let planned: Vec<_> = inputs.iter().flat_map(|i| plan(i, output, false)).collect();
-    count(&planned, output, job.format.ext())
+    let planned = assign(inputs.iter().flat_map(|i| plan(i, output, false)).collect(), output, job.format.ext(), false);
+    count(&planned, output)
 }
 
 /// Run the batch over `inputs`, in order. Each of `upscalers` (one per GPU) gets an inference
@@ -519,7 +595,7 @@ pub fn run(inputs: Vec<Input>, output: Output, job: Job, upscalers: Vec<OpenUpsc
     let j = job.clone();
     handles.extend(workers(n, infer_rx, done_tx, move |stage, r| finish_stage(stage, &j, r)));
 
-    let planned: Vec<_> = inputs.iter().flat_map(|i| plan(i, &output, true)).collect();
+    let planned = assign(inputs.iter().flat_map(|i| plan(i, &output, true)).collect(), &output, &format_ext, true);
     let walker = thread::spawn(move || walk(&planned, &output, &format_ext, item_tx));
 
     // Write results in input order.
@@ -544,4 +620,51 @@ fn needs_model(work: &Work) -> bool {
         let m = c.model_file_path.trim();
         !m.is_empty() && m != "No Model"
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn names(filename: &str, inputs: &[(&str, &str, bool)]) -> Vec<String> {
+        let out = Output { dir: "out".into(), filename: filename.into(), overwrite: true };
+        let raw = inputs.iter().map(|&(src, dir, a)| (PathBuf::from(src), PathBuf::from("out").join(dir), a, true)).collect();
+        assign(raw, &out, "webp", false)
+            .into_iter()
+            .map(|p| p.dest.strip_prefix("out").unwrap().to_string_lossy().replace('\\', "/"))
+            .collect()
+    }
+
+    #[test]
+    fn unique_names_stay_as_they_are() {
+        let n = names("%filename%-mangajanai", &[("in/Vol 1.cbz", "", true), ("in/Vol 2.cbz", "", true), ("in/001.png", "", false)]);
+        assert_eq!(n, ["Vol 1-mangajanai.cbz", "Vol 2-mangajanai.cbz", "001-mangajanai.webp"]);
+        assert_eq!(names("upscaled", &[("in/Vol 1.cbz", "", true)]), ["upscaled.cbz"], "one input: no change");
+        assert_eq!(names("upscaled", &[("in/Vol 1.cbz", "", true), ("in/001.png", "", false)]), ["upscaled.cbz", "upscaled.webp"]);
+        assert_eq!(names("upscaled", &[("in/a/x.cbz", "a", true), ("in/b/y.cbz", "b", true)]), ["a/upscaled.cbz", "b/upscaled.cbz"], "different folders");
+    }
+
+    #[test]
+    fn a_name_without_filename_gets_it_where_outputs_collide() {
+        let n = names("upscaled", &[("in/Vol 1.cbz", "", true), ("in/Vol 2.cbz", "", true), ("in/001.png", "", false)]);
+        assert_eq!(n, ["upscaled-Vol 1.cbz", "upscaled-Vol 2.cbz", "upscaled.webp"], "only the colliding ones");
+    }
+
+    #[test]
+    fn same_names_with_different_extensions_get_the_extension() {
+        let n = names("%filename%-mangajanai", &[("in/Vol 1.cbz", "", true), ("in/Vol 1.zip", "", true), ("in/001.png", "", false), ("in/001.JPG", "", false)]);
+        assert_eq!(n, ["Vol 1-mangajanai-cbz.cbz", "Vol 1-mangajanai-zip.cbz", "001-mangajanai-png.webp", "001-mangajanai-jpg.webp"]);
+        let n = names("upscaled", &[("in/Vol 1.cbz", "", true), ("in/Vol 1.zip", "", true)]);
+        assert_eq!(n, ["upscaled-Vol 1-cbz.cbz", "upscaled-Vol 1-zip.cbz"]);
+    }
+
+    #[test]
+    fn anything_left_gets_a_number() {
+        // a.png and a.PNG: both "-png" after the extension step
+        let n = names("x", &[("in/a.png", "", false), ("in/a.PNG", "", false)]);
+        assert_eq!(n, ["x-a-png.webp", "x-a-png-2.webp"]);
+        // a renamed output that lands on another input's name
+        let n = names("%filename%", &[("in/a-png.png", "", false), ("in/a.png", "", false), ("in/a.jpg", "", false)]);
+        assert_eq!(n, ["a-png.webp", "a-png-2.webp", "a-jpg.webp"]);
+    }
 }

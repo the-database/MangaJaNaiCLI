@@ -74,11 +74,12 @@ pub fn pre_resize(chain: &Chain, (w, h): (u32, u32)) -> Option<(u32, u32)> {
     (dims != (w, h)).then_some(dims)
 }
 
-/// The final size for an image now `(w, h)` whose original size was `orig`, or `None` if it's
-/// already there. Fit mode fits whichever dimension is tighter; scale mode reaches
-/// `round(orig_h * scale)` tall, keeping the current aspect ratio.
-pub fn final_size(target: Target, orig: (u32, u32), (w, h): (u32, u32)) -> Option<(u32, u32)> {
-    let (ow, oh) = (orig.0 as f64, orig.1 as f64);
+/// The final size for an image now `(w, h)`, measured from `base` (the size before the model: the
+/// file's, or the chain's pre-resized size), or `None` if it's already there. Fit mode fits
+/// whichever dimension is tighter; scale mode reaches `round(base_h * scale)` tall, keeping the
+/// current aspect ratio.
+pub fn final_size(target: Target, base: (u32, u32), (w, h): (u32, u32)) -> Option<(u32, u32)> {
+    let (ow, oh) = (base.0 as f64, base.1 as f64);
     let target = match target {
         Target::Native => return None,
         Target::Fit(tw, th) => {

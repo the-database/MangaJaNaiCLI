@@ -65,7 +65,8 @@ auto_levels =
 
 [resize]
 ; The final size after the model. Set at most one; with none, the output is at the model's scale.
-; scale = times the original size; height / width = pixels, keeping the shape; fit = a box like 1920x1080
+; scale = times the original size (or the rule's pre_resize size, if it has one);
+; height / width = pixels, keeping the shape; fit = a box like 1920x1080
 scale =
 height =
 width =

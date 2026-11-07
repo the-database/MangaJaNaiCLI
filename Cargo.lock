@@ -43,9 +43,10 @@ dependencies = [
 
 [[package]]
 name = "aji-runtime"
-version = "0.1.1"
-source = "git+https://github.com/the-database/aji-runtime?rev=090015f26bcfb12e2ebbd40f4922c1afe4bf75f1#090015f26bcfb12e2ebbd40f4922c1afe4bf75f1"
+version = "0.2.0"
+source = "git+https://github.com/the-database/aji-runtime?rev=e7a480309e60b8aad71b4625f633d58888628ade#e7a480309e60b8aad71b4625f633d58888628ade"
 dependencies = [
+ "junction",
  "libloading",
  "serde",
  "serde_json",
@@ -1020,6 +1021,16 @@ dependencies = [
  "cfg-if",
  "futures-util",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "junction"
+version = "2.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cde48f36530cbd91b65f050101e6c056d6eb743cea2a8f0f19beef69c6742ff8"
+dependencies = [
+ "scopeguard",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

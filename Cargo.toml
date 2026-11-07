@@ -52,7 +52,7 @@ sevenz-rust2 = { version = "0.24", default-features = false, features = ["util"]
 libloading = "0.9"
 # The shared runtime pack store (setup --store): TensorRT, TensorRT-RTX and the models installed once
 # per user and shared with the other apps. Pinned to a commit of the-database/aji-runtime.
-aji-runtime = { git = "https://github.com/the-database/aji-runtime", rev = "090015f26bcfb12e2ebbd40f4922c1afe4bf75f1" }
+aji-runtime = { git = "https://github.com/the-database/aji-runtime", rev = "e7a480309e60b8aad71b4625f633d58888628ade" }
 
 [build-dependencies]
 embed-manifest = "1.5.1"

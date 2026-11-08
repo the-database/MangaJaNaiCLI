@@ -556,9 +556,9 @@ impl Sink {
 /// pause, which closes it.
 pub type OpenUpscaler = Box<dyn Fn() -> Result<Upscaler, String> + Send>;
 
-/// Pausing a run (MangaJaNai GUI's Pause): each inference thread closes its upscaler (its models
-/// and the libaji context, so the GPU memory is freed) once it's done with the image it's on, and
-/// waits. Resuming opens it again when the next image needs it: its engines load from the cache,
+/// Pausing a run (MangaJaNai GUI's Pause): each inference thread closes its upscaler (its models,
+/// the libaji context and, with libaji 0.24+, the device's CUDA context, so the GPU memory is
+/// freed) once it's done with the image it's on, and waits. Resuming opens it again when the next image needs it: its engines load from the cache,
 /// nothing is rebuilt. Decoding and encoding stop on their own once the queues between the stages
 /// are full. `PAUSED` is printed when every GPU has let go, `RESUMED` on resume.
 pub struct Pause {
@@ -609,7 +609,9 @@ impl Pause {
         if !s.paused {
             return;
         }
-        *up = None;
+        if let Some(u) = up.take() {
+            u.close();
+        }
         s.released += 1;
         if s.released == s.threads {
             progress::paused();

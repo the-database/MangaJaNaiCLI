@@ -86,6 +86,8 @@ fn resolve_in(model: &str, dirs: &[PathBuf]) -> Option<PathBuf> {
 
 pub struct Upscaler {
     ctx: Context,
+    /// For [`Upscaler::close`]'s device release.
+    aji: Aji,
     backend: Backend,
     /// The device `ctx` runs on, for the precision hints.
     device: Device,
@@ -147,6 +149,7 @@ impl Upscaler {
                     });
                     return Ok(Self {
                         ctx,
+                        aji: aji.clone(),
                         backend,
                         device: device.clone(),
                         hinted: HashSet::new(),
@@ -162,6 +165,23 @@ impl Upscaler {
             }
         }
         Err(err)
+    }
+
+    /// Closes the models and contexts, then has libaji release the device: on the CUDA backends
+    /// that frees the CUDA context TensorRT's runtime would otherwise keep until the process exits
+    /// (a few hundred MB), so a pause gives back all of its GPU memory. Nothing else in this
+    /// process uses CUDA. The release waits for the last context on the GPU (another stream's),
+    /// and an older libaji without it just keeps that memory, as before.
+    pub fn close(self) {
+        let (aji, id) = (self.aji.clone(), self.device.id);
+        let mut backends = vec![self.backend];
+        if self.fallback.as_ref().is_some_and(|f| matches!(f.ctx, Some(Ok(_)))) {
+            backends.push(Backend::TensorRt);
+        }
+        drop(self);
+        for backend in backends {
+            let _ = aji.release_device(backend, id);
+        }
     }
 
     /// A chain's model file (see [`resolve_in`]).

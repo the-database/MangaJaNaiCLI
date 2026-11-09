@@ -102,6 +102,8 @@ impl Options {
 /// - `SETUP_EXTRACT <name>`: the component's archive is being unpacked.
 /// - `SETUP_DONE`: finished, nothing left to do (not printed after `--check` with work left).
 ///
+/// (`mangajanai store move --progress lines` has its own lines, `STORE_*`: see `store.rs`.)
+///
 /// A failure ends the run without `SETUP_DONE`: the message is on stderr (`error: ...`) and the exit
 /// code isn't 0. The human output on stderr is unchanged, apart from the download percentages.
 struct Lines(bool);
@@ -515,6 +517,11 @@ pub fn run(opts: &Options) -> Result<i32, String> {
     let dir = install_dir();
     // a store install stays one when setup runs again without the flags
     let store = opts.store.clone().or_else(|| load_state(&dir).store);
+    if store.is_some() {
+        // a moved store whose folder is missing (an unplugged drive): say so, rather than fail to
+        // open it or install into it
+        crate::store::check_available()?;
+    }
     if opts.remove {
         return remove(&dir, store, &Lines(opts.lines));
     }

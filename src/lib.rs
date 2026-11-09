@@ -15,4 +15,5 @@ pub mod progress;
 pub mod run;
 pub mod settings;
 pub mod setup;
+pub mod store;
 pub mod upscaler;

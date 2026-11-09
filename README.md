@@ -45,6 +45,23 @@ runtime and models. To use a runtime from elsewhere instead (e.g. an mpv-AnimeJa
 `animejanai\inference` folder), pass `--aji-dir <folder>`. On Linux, a system TensorRT 11 from NVIDIA's
 CUDA apt repository works too: `trtexec` is then found on `PATH`.
 
+### The shared runtime folder
+
+An app's install of mangajanai (yosh's AI add-on) can share the TensorRT runtime and the models
+with your other JaNai apps, in one per-user folder (`%LOCALAPPDATA%\the-database\aji`, or
+`~/.local/share/the-database/aji`). To put those few GB on another drive:
+
+```sh
+mangajanai store location            # where it is, and whether its folder is there
+mangajanai store move D:\JaNai       # move it to a new or empty folder; nothing is downloaded again
+mangajanai store move --default      # move it back
+mangajanai store reset               # the moved folder is gone for good: start an empty one
+```
+
+Close the other JaNai apps first. The default path becomes a link to the new folder, so every app
+keeps working. While that folder is missing (an unplugged drive), mangajanai stops with a message
+saying so.
+
 ## Use
 
 Keep your settings in a file so a run is just `mangajanai`:

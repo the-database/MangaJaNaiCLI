@@ -28,6 +28,11 @@ Usage:
                                         --store --app-id ID --app-path EXE: an app's install,
                                         sharing TensorRT and the models with other apps through
                                         the per-user pack store; --remove: drop it from the store
+  {prog} store location [--json]        where the shared pack store is, and if its folder is there
+  {prog} store move <folder>            move it to a new or empty folder on another drive (the
+                                        default path links there); --default: move it back
+                                        (--progress lines: also report on stdout for programs)
+  {prog} store reset                    stop using a moved store whose folder is gone for good
 
 With no inputs on the command line, `input` from the settings file is used. The settings file is
 -c <file>, else {CONFIG_NAME} in the current folder, else next to the program; flags override it.
@@ -178,6 +183,9 @@ struct Flags {
     app_id: Option<String>,
     app_path: Option<PathBuf>,
     remove: bool,
+    // store
+    json: bool,
+    to_default: bool,
 }
 
 fn num<T: std::str::FromStr>(name: &str, v: &str) -> Result<T, String> {
@@ -274,6 +282,8 @@ fn parse_flags(args: Vec<String>) -> Result<Flags, String> {
             "--app-id" => f.app_id = Some(value(&key)?),
             "--app-path" => f.app_path = Some(value(&key)?.into()),
             "--remove" => f.remove = true,
+            "--json" => f.json = true,
+            "--default" => f.to_default = true,
             "-V" | "--version" => {
                 println!("{} {}", prog_name(), env!("CARGO_PKG_VERSION"));
                 std::process::exit(0);
@@ -305,7 +315,7 @@ pub fn main() {
 }
 
 fn dispatch(mut args: Vec<String>) -> Result<i32, String> {
-    let sub = args.first().filter(|a| matches!(a.as_str(), "init" | "devices" | "bench" | "setup") && !Path::new(a.as_str()).exists()).cloned();
+    let sub = args.first().filter(|a| matches!(a.as_str(), "init" | "devices" | "bench" | "setup" | "store") && !Path::new(a.as_str()).exists()).cloned();
     if sub.is_some() {
         args.remove(0);
     }
@@ -326,6 +336,10 @@ fn dispatch(mut args: Vec<String>) -> Result<i32, String> {
                 store,
                 remove: flags.remove,
             });
+        }
+        Some("store") => {
+            let words: Vec<String> = flags.inputs.iter().map(|p| p.to_string_lossy().into_owned()).collect();
+            return crate::store::run(&words, flags.json, flags.to_default, flags.lines);
         }
         Some("devices") => return devices(&flags),
         Some("bench") => return bench(flags),
@@ -825,8 +839,16 @@ fn ensure_runtime(aji_dir: &Path) -> Result<bool, String> {
     }
 }
 
+/// libaji in `aji_dir` loads TensorRT and the models from the shared pack store when setup put
+/// `aji-runtime.json` beside it: stop early when the store's folder is missing (a moved store on
+/// an unplugged drive), with how to fix it, instead of a missing-runtime error later.
+fn check_store(aji_dir: &Path) -> Result<(), String> {
+    if aji_dir.join("aji-runtime.json").is_file() { crate::store::check_available() } else { Ok(()) }
+}
+
 fn upscale(flags: Flags) -> Result<i32, String> {
     let plan = resolve(&flags)?;
+    check_store(&plan.aji_dir)?;
     if flags.aji_dir.is_none() && !ensure_runtime(&plan.aji_dir)? {
         return Ok(1);
     }
@@ -873,6 +895,7 @@ fn init(flags: &Flags) -> Result<i32, String> {
 fn devices(flags: &Flags) -> Result<i32, String> {
     use yosh_image::aji::Backend;
     let aji_dir = flags.aji_dir.clone().unwrap_or_else(default_aji_dir);
+    check_store(&aji_dir)?;
     let aji = upscaler::load_aji(&aji_dir).map_err(|e| format!("loading libaji from {}: {e}", aji_dir.display()))?;
     let backends: Vec<Backend> = match flags.backend {
         Some(b) => b.candidates().to_vec(),
@@ -901,6 +924,7 @@ fn bench(flags: Flags) -> Result<i32, String> {
     let model = flags.model.clone().or_else(|| flags.inputs.first().map(|p| p.to_string_lossy().into_owned())).ok_or("bench needs a model: bench <model.onnx>")?;
     let model = model_ref(Path::new(""), &model);
     let aji_dir = flags.aji_dir.clone().unwrap_or_else(default_aji_dir);
+    check_store(&aji_dir)?;
     let backend = flags.backend.unwrap_or(BackendChoice::Auto);
     let id = device_ids(&aji_dir, backend, flags.device.as_deref())?[0];
     let tile = flags.tile.unwrap_or(512);

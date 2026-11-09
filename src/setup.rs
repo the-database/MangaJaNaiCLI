@@ -131,6 +131,10 @@ struct Pack {
     asset: String,
     sha256: String,
     bytes: u64,
+    /// Where the archive is. A pack unchanged since an earlier runtime release keeps that release's
+    /// archive, so this isn't always on `RUNTIME_TAG`; `None` in an index without urls.
+    #[serde(default)]
+    url: Option<String>,
     /// Each file's SHA-256 and size (the shared release's index has them).
     #[serde(default)]
     files: Vec<PackFile>,
@@ -379,13 +383,21 @@ fn runtime_index(opts: &Options) -> Result<Vec<Pack>, String> {
     Ok(index.packs)
 }
 
+/// A runtime pack's download: the index's url, else (an index without urls) on `RUNTIME_TAG`.
+fn pack_url(p: &Pack) -> String {
+    match &p.url {
+        Some(u) if !u.is_empty() => u.clone(),
+        _ => format!("https://github.com/{RUNTIME_REPO}/releases/download/{RUNTIME_TAG}/{}", p.asset),
+    }
+}
+
 /// What this machine needs, in install order.
 fn plan(opts: &Options, gpus: &[nvml::Gpu]) -> Result<Vec<Component>, String> {
     let packs = runtime_index(opts)?;
     let (all_gpus, gpus) = (gpus, &nvml::trt_gpus(gpus));
     let pack = |name: &str| packs.iter().find(|p| p.name == name).cloned();
     let runtime = |p: Pack| Component {
-        url: format!("https://github.com/{RUNTIME_REPO}/releases/download/{RUNTIME_TAG}/{}", p.asset),
+        url: pack_url(&p),
         name: p.name,
         version: p.version,
         asset: p.asset,
@@ -849,6 +861,20 @@ fn remove(dir: &Path, store: Option<StoreMode>, lines: &Lines) -> Result<i32, St
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn runtime_packs_download_from_the_index_url() {
+        // a pack unchanged since an earlier runtime release keeps that release's archive
+        let p: Pack = serde_json::from_str(
+            r#"{"name":"dml-runtime","version":"1","asset":"dml-runtime-windows.7z","sha256":"x","bytes":1,
+                "url":"https://github.com/the-database/animejanai-inference/releases/download/runtime-2/dml-runtime-windows.7z"}"#,
+        )
+        .unwrap();
+        assert_eq!(pack_url(&p), "https://github.com/the-database/animejanai-inference/releases/download/runtime-2/dml-runtime-windows.7z");
+        // an index without urls: the pinned release
+        let p: Pack = serde_json::from_str(r#"{"name":"a","version":"1","asset":"a.7z","sha256":"x","bytes":1}"#).unwrap();
+        assert_eq!(pack_url(&p), format!("https://github.com/{RUNTIME_REPO}/releases/download/{RUNTIME_TAG}/a.7z"));
+    }
 
     fn pack(name: &str, kind: &str, files: &[(&str, &[u8])]) -> (aji_runtime::IndexPack, PathBuf) {
         let p = aji_runtime::IndexPack {

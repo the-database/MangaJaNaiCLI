@@ -75,7 +75,9 @@ To change a TensorRT/ORT/DirectML version:
 3. Merge the PR it asks `bump-pins.yml` here for (`runtime-packs`), which updates `RUNTIME_TAG` and
    the index hashes.
 
-`--mirror <folder>` installs from local archives, for testing before anything is published.
+`--mirror <folder>` installs from local archives, for testing before anything is published. A pack
+unchanged since an earlier runtime release keeps that release's archive (its index `url`), so a
+mirror needs those archives too, not just the pinned release's assets.
 
 **Store mode** (`setup --store --app-id ID --app-path EXE`): an app's install of the CLI (yosh's
 add-on) shares TensorRT, its builder packs, TensorRT-RTX and the models with the other apps

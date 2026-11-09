@@ -6,6 +6,7 @@
 pub mod chain;
 pub mod cli;
 pub mod config;
+pub mod download;
 pub mod encode;
 pub mod levels;
 pub mod nvml;

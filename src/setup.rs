@@ -249,40 +249,25 @@ fn sha256_bytes(b: &[u8]) -> String {
     hex(&Sha256::digest(b))
 }
 
-/// Download `url` to `dest`, showing progress on stderr (and as `SETUP_DOWNLOAD` lines).
+/// Download `url` to `dest`, showing progress on stderr (and as `SETUP_DOWNLOAD` lines). Stalls time
+/// out and transient failures are retried, resuming where they stopped (`download.rs`).
 fn download(url: &str, dest: &Path, label: &str, expected: u64, lines: &Lines) -> Result<(), String> {
-    let resp = ureq::get(url).call().map_err(|e| format!("downloading {url}: {e}"))?;
-    let total = resp
-        .headers()
-        .get("content-length")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.parse::<u64>().ok())
-        .unwrap_or(expected);
-    let mut reader = resp.into_body().into_reader();
     let part = dest.with_extension("part");
-    let mut out = std::io::BufWriter::new(std::fs::File::create(&part).map_err(|e| format!("{}: {e}", part.display()))?);
     let mut shown = Shown::new();
-    let (mut got, mut said) = (0u64, u64::MAX);
-    lines.say(format_args!("SETUP_DOWNLOAD {label} 0 {total}"));
-    let mut buf = vec![0u8; 1 << 20];
-    loop {
-        let n = reader.read(&mut buf).map_err(|e| format!("downloading {url}: {e}"))?;
-        if n == 0 {
-            break;
+    let mut said = (u64::MAX, u64::MAX);
+    let r = crate::download::download(url, &part, expected, &crate::download::Policy::default(), &mut |got, total| {
+        // the first report of each request, then once per percent
+        let pct = (got * 100).checked_div(total).unwrap_or(0);
+        if got == 0 || (pct, total) != said {
+            said = (pct, total);
+            lines.say(format_args!("SETUP_DOWNLOAD {label} {got} {total}"));
         }
-        out.write_all(&buf[..n]).map_err(|e| e.to_string())?;
-        got += n as u64;
-        if let Some(pct) = (got * 100).checked_div(total) {
-            if pct != said {
-                said = pct;
-                lines.say(format_args!("SETUP_DOWNLOAD {label} {got} {total}"));
-            }
+        if total > 0 {
             shown.show(label, got, total);
         }
-    }
-    out.flush().map_err(|e| e.to_string())?;
-    drop(out);
+    });
     shown.end();
+    r?;
     std::fs::rename(&part, dest).map_err(|e| format!("{}: {e}", dest.display()))
 }
 
@@ -357,10 +342,9 @@ fn extract(archive: &Path, format: Format, dest: &Path) -> Result<Vec<String>, S
     Ok(files)
 }
 
-/// Fetch a small file (the runtime index) into memory.
+/// Fetch a small file (the runtime index) into memory, with `download.rs`'s timeouts and retries.
 fn fetch_small(url: &str) -> Result<Vec<u8>, String> {
-    let mut resp = ureq::get(url).call().map_err(|e| format!("downloading {url}: {e}"))?;
-    resp.body_mut().read_to_vec().map_err(|e| format!("downloading {url}: {e}"))
+    crate::download::fetch_small(url, &crate::download::Policy::default())
 }
 
 fn runtime_index(opts: &Options) -> Result<Vec<Pack>, String> {

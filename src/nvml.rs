@@ -10,11 +10,37 @@ pub struct Gpu {
     pub minor: i32,
 }
 
+/// The oldest compute capability TensorRT and TensorRT-RTX run on: Turing (GeForce RTX 20 / GTX 16
+/// series). The TensorRT 11 on CUDA 13 that setup installs supports 7.5 and up, and libaji's CUDA
+/// kernels start there; PTX only compiles forward, so the `trt-ptx` pack can't help an older GPU.
+/// Such a GPU counts as no NVIDIA GPU: DirectML on Windows, nothing on Linux.
+pub const TRT_MIN_COMPUTE: (i32, i32) = (7, 5);
+
+/// Whether TensorRT can run on a GPU of this compute capability ([`TRT_MIN_COMPUTE`]).
+pub fn trt_capable(major: i32, minor: i32) -> bool {
+    (major, minor) >= TRT_MIN_COMPUTE
+}
+
+/// "TensorRT needs an NVIDIA GeForce RTX 20 / GTX 16 series or newer GPU (compute capability 7.5+)"
+pub fn trt_needs() -> String {
+    let (major, minor) = TRT_MIN_COMPUTE;
+    format!("TensorRT needs an NVIDIA GeForce RTX 20 / GTX 16 series or newer GPU (compute capability {major}.{minor}+)")
+}
+
 impl Gpu {
     /// "sm86", the name TensorRT's builder resources and the runtime packs use.
     pub fn sm(&self) -> String {
         format!("sm{}{}", self.major, self.minor)
     }
+
+    pub fn trt_capable(&self) -> bool {
+        trt_capable(self.major, self.minor)
+    }
+}
+
+/// The GPUs TensorRT can run on, from [`gpus`]: the others count as no NVIDIA GPU.
+pub fn trt_gpus(gpus: &[Gpu]) -> Vec<Gpu> {
+    gpus.iter().filter(|g| g.trt_capable()).cloned().collect()
 }
 
 type Device = *mut c_void;

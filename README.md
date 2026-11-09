@@ -28,7 +28,8 @@ The command is `mangajanai`. The same program is MangaJaNai GUI's upscaling back
 1. Download `mangajanai-windows-x64.zip` or `mangajanai-linux-x64.tar.zst` from
    [Releases](https://github.com/the-database/MangaJaNaiCLI/releases) and unpack it anywhere.
 2. Run `mangajanai setup`. It detects the GPU and downloads what this PC needs, into the same folder:
-   - the TensorRT runtime and the builder files for your GPU's generation (NVIDIA);
+   - the TensorRT runtime and the builder files for your GPU's generation (NVIDIA GeForce RTX 20 /
+     GTX 16 series and newer; older NVIDIA GPUs, like the GTX 10 series, run on DirectML);
    - TensorRT-RTX (Windows, RTX 20 series and newer);
    - DirectML (Windows, for any GPU);
    - the MangaJaNai and IllustrationJaNai models (skip them with `--no-models`).
@@ -38,7 +39,7 @@ The command is `mangajanai`. The same program is MangaJaNai GUI's upscaling back
 3. Run `mangajanai <input> -o <output>`.
 
 All you need beforehand is a GPU driver. On Linux, mangajanai runs on TensorRT only, so it needs an
-NVIDIA GPU and driver. The runtime comes from setup; no CUDA or TensorRT install is needed.
+NVIDIA GeForce RTX 20 / GTX 16 series or newer GPU (compute capability 7.5+) and driver. The runtime comes from setup; no CUDA or TensorRT install is needed.
 
 On Windows, if you skip setup and MangaJaNai GUI is installed, mangajanai uses the GUI's inference
 runtime and models. To use a runtime from elsewhere instead (e.g. an mpv-AnimeJaNai

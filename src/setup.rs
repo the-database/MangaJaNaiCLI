@@ -4,7 +4,8 @@
 //! - Windows: ONNX Runtime + DirectML (always: AMD/Intel GPUs, and Auto's fallback).
 //! - An NVIDIA GPU: the TensorRT runtime, the builder resources for each GPU generation present (or
 //!   the PTX fallback for one without its own), and on Windows TensorRT-RTX on the GPUs it's the
-//!   default for (RTX 20 series and newer).
+//!   default for (RTX 20 series and newer). A GPU older than TensorRT supports (compute capability
+//!   below 7.5, `nvml::TRT_MIN_COMPUTE`) counts as no NVIDIA GPU.
 //! - Models: MangaJaNai and IllustrationJaNai, plus the DAT2/HAT variant this GPU runs best (bf16 on
 //!   NVIDIA compute capability 8.0+, fp32 otherwise).
 //!
@@ -381,6 +382,7 @@ fn runtime_index(opts: &Options) -> Result<Vec<Pack>, String> {
 /// What this machine needs, in install order.
 fn plan(opts: &Options, gpus: &[nvml::Gpu]) -> Result<Vec<Component>, String> {
     let packs = runtime_index(opts)?;
+    let (all_gpus, gpus) = (gpus, &nvml::trt_gpus(gpus));
     let pack = |name: &str| packs.iter().find(|p| p.name == name).cloned();
     let runtime = |p: Pack| Component {
         url: format!("https://github.com/{RUNTIME_REPO}/releases/download/{RUNTIME_TAG}/{}", p.asset),
@@ -422,7 +424,7 @@ fn plan(opts: &Options, gpus: &[nvml::Gpu]) -> Result<Vec<Component>, String> {
             });
         }
     } else if !cfg!(windows) {
-        return Err("no NVIDIA GPU found. On Linux mangajanai runs on TensorRT, which needs an NVIDIA GPU and driver.".into());
+        return Err(no_trt_gpu_on_linux(all_gpus));
     }
     if !opts.no_models {
         let bf16 = gpus.iter().any(|g| g.major >= 8);
@@ -507,8 +509,22 @@ fn print_gpus(gpus: &[nvml::Gpu]) {
         eprintln!("GPU: no NVIDIA GPU found{}", if cfg!(windows) { "; using DirectML (AMD/Intel/other GPUs)" } else { "" });
     } else {
         for g in gpus {
-            eprintln!("GPU: {} (compute {}.{})", g.name, g.major, g.minor);
+            let old = if g.trt_capable() { "" } else { "; too old for TensorRT" };
+            eprintln!("GPU: {} (compute {}.{}{old})", g.name, g.major, g.minor);
         }
+        if cfg!(windows) && !gpus.iter().any(nvml::Gpu::trt_capable) {
+            eprintln!("{}; using DirectML", nvml::trt_needs());
+        }
+    }
+}
+
+/// Linux, where TensorRT is the only backend, without a GPU it runs on.
+fn no_trt_gpu_on_linux(gpus: &[nvml::Gpu]) -> String {
+    if gpus.is_empty() {
+        "no NVIDIA GPU found. On Linux mangajanai runs on TensorRT, which needs an NVIDIA GPU and driver.".into()
+    } else {
+        let found: Vec<String> = gpus.iter().map(|g| format!("{} is compute {}.{}", g.name, g.major, g.minor)).collect();
+        format!("{}; {}. On Linux mangajanai runs on TensorRT only, so it can't upscale on this PC.", nvml::trt_needs(), found.join(", "))
     }
 }
 
@@ -639,6 +655,7 @@ fn store_index(opts: &Options) -> Result<aji_runtime::Index, String> {
 /// builder packs, TensorRT-RTX where it's the default (if this folder has its libaji backend),
 /// and the models, chosen as in [`plan`].
 fn store_wants(dir: &Path, gpus: &[nvml::Gpu], no_models: bool) -> Result<Vec<String>, String> {
+    let (all_gpus, gpus) = (gpus, &nvml::trt_gpus(gpus));
     let mut w = Vec::new();
     if !gpus.is_empty() {
         w.push("trt".to_string());
@@ -646,7 +663,7 @@ fn store_wants(dir: &Path, gpus: &[nvml::Gpu], no_models: bool) -> Result<Vec<St
             w.push("trtrtx".to_string());
         }
     } else if !cfg!(windows) {
-        return Err("no NVIDIA GPU found. On Linux mangajanai runs on TensorRT, which needs an NVIDIA GPU and driver.".into());
+        return Err(no_trt_gpu_on_linux(all_gpus));
     }
     if !no_models {
         let bf16 = gpus.iter().any(|g| g.major >= 8);
@@ -706,8 +723,11 @@ fn run_store(opts: &Options, dir: &Path, mode: &StoreMode) -> Result<i32, String
     print_gpus(&gpus);
     let index = store_index(opts)?;
     let wants = store_wants(dir, &gpus, opts.no_models)?;
-    let rgpus: Vec<aji_runtime::nvml::Gpu> =
-        gpus.iter().map(|g| aji_runtime::nvml::Gpu { name: g.name.clone(), major: g.major, minor: g.minor }).collect();
+    // only the GPUs TensorRT runs on get builder packs
+    let rgpus: Vec<aji_runtime::nvml::Gpu> = nvml::trt_gpus(&gpus)
+        .into_iter()
+        .map(|g| aji_runtime::nvml::Gpu { name: g.name, major: g.major, minor: g.minor })
+        .collect();
     let packs = index.select(&wants, &rgpus).map_err(|e| e.to_string())?;
     // ONNX Runtime + DirectML: private, as before
     let mut private = Vec::new();
@@ -971,8 +991,9 @@ mod tests {
     fn store_wants_follow_the_gpus() {
         let dir = std::env::temp_dir();
         let g = |major, minor| nvml::Gpu { name: "g".into(), major, minor };
-        let w = store_wants(&dir, &[g(7, 0)], false).unwrap();
-        assert_eq!(w, ["trt", "models-mangajanai", "models-illustrationjanai", "models-illustrationjanai-fp32"]);
+        let w = store_wants(&dir, &[g(7, 5)], false).unwrap();
+        assert_eq!(w[0], "trt");
+        assert_eq!(w[w.len() - 3..], ["models-mangajanai", "models-illustrationjanai", "models-illustrationjanai-fp32"]);
         let w = store_wants(&dir, &[g(12, 0)], true).unwrap();
         assert_eq!(w[0], "trt");
         assert!(!w.iter().any(|x| x.starts_with("models-")));
@@ -980,6 +1001,76 @@ mod tests {
             assert_eq!(store_wants(&dir, &[], true).unwrap(), Vec::<String>::new(), "DirectML only");
         } else {
             assert!(store_wants(&dir, &[], true).is_err());
+        }
+    }
+
+    // ---- GPUs too old for TensorRT (compute capability below 7.5) ----------------------------
+
+    fn gpu(name: &str, major: i32, minor: i32) -> nvml::Gpu {
+        nvml::Gpu { name: name.into(), major, minor }
+    }
+
+    #[test]
+    fn trt_threshold_is_turing() {
+        assert_eq!(nvml::TRT_MIN_COMPUTE, (7, 5));
+        for (major, minor) in [(5, 2), (6, 1), (7, 0), (7, 2)] {
+            assert!(!nvml::trt_capable(major, minor), "{major}.{minor}");
+        }
+        for (major, minor) in [(7, 5), (8, 6), (12, 0), (13, 0)] {
+            assert!(nvml::trt_capable(major, minor), "{major}.{minor}");
+        }
+        let all = [gpu("GTX 1080", 6, 1), gpu("RTX 3080", 8, 6), gpu("Titan V", 7, 0)];
+        assert_eq!(nvml::trt_gpus(&all).iter().map(|g| g.name.as_str()).collect::<Vec<_>>(), ["RTX 3080"]);
+    }
+
+    #[test]
+    fn plan_treats_pre_turing_gpus_as_no_nvidia_gpu() {
+        let dir = std::env::temp_dir().join(format!("mangajanai-setup-preturing-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let packs: Vec<_> = ["dml-runtime", "trt-runtime", "trt-sm75", "trt-sm86", "trt-ptx"]
+            .iter()
+            .map(|n| serde_json::json!({"name": n, "version": "1", "asset": format!("{n}.7z"), "sha256": "x", "bytes": 1}))
+            .collect();
+        std::fs::write(dir.join(format!("packs-{}.json", platform())), serde_json::json!({ "packs": packs }).to_string()).unwrap();
+        let opts = Options { no_models: true, check: true, mirror: Some(dir.clone()), lines: false, store: None, remove: false };
+        let names = |gpus: &[nvml::Gpu]| plan(&opts, gpus).map(|v| v.into_iter().map(|c| c.name).filter(|n| n != "trt-rtx").collect::<Vec<_>>());
+        let dml: &[&str] = if cfg!(windows) { &["dml-runtime"] } else { &[] };
+
+        // a GTX 1080 next to an RTX 3080: only the 3080 gets TensorRT's builder pack, no PTX
+        let mut want = dml.to_vec();
+        want.extend(["trt-runtime", "trt-sm86"]);
+        assert_eq!(names(&[gpu("GTX 1080", 6, 1), gpu("RTX 3080", 8, 6)]).unwrap(), want);
+        // a future generation without its own pack still gets PTX
+        let mut want = dml.to_vec();
+        want.extend(["trt-runtime", "trt-ptx"]);
+        assert_eq!(names(&[gpu("next", 13, 0)]).unwrap(), want);
+        // only old GPUs: no TensorRT at all (DirectML on Windows; on Linux, an error saying why)
+        for old in [vec![gpu("GTX 1080", 6, 1)], vec![gpu("Titan V", 7, 0), gpu("GTX 1060", 6, 1)]] {
+            if cfg!(windows) {
+                assert_eq!(names(&old).unwrap(), dml);
+            } else {
+                let e = names(&old).unwrap_err();
+                assert!(e.starts_with("TensorRT needs an NVIDIA GeForce RTX 20 / GTX 16 series or newer GPU (compute capability 7.5+)"), "{e}");
+                assert!(e.contains(&format!("{} is compute {}.{}", old[0].name, old[0].major, old[0].minor)), "{e}");
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn store_wants_treat_pre_turing_gpus_as_no_nvidia_gpu() {
+        let dir = std::env::temp_dir();
+        // mixed: TensorRT for the new GPU (aji-runtime then picks its builder pack)
+        let w = store_wants(&dir, &[gpu("GTX 1080", 6, 1), gpu("RTX 3080", 8, 6)], true).unwrap();
+        assert_eq!(w[0], "trt");
+        // only old: as without an NVIDIA GPU, with the fp32 model variant
+        let old = [gpu("GTX 1080", 6, 1)];
+        if cfg!(windows) {
+            assert_eq!(store_wants(&dir, &old, true).unwrap(), Vec::<String>::new());
+            assert_eq!(store_wants(&dir, &old, false).unwrap().last().map(String::as_str), Some("models-illustrationjanai-fp32"));
+        } else {
+            let e = store_wants(&dir, &old, true).unwrap_err();
+            assert!(e.contains("compute capability 7.5+") && e.contains("on TensorRT only"), "{e}");
         }
     }
 }

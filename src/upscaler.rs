@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use yosh_image::aji::{Aji, Backend, Context, ContextParams, Device, LoadParams, Model, ModelState, Pixels, PixelsMut, Upscaled};
 
-use crate::{precision, progress};
+use crate::{nvml, precision, progress};
 
 /// Load libaji from `dir`. On Linux, first load the CUDA and TensorRT libraries `mangajanai setup`
 /// put beside it, by full path and globally: libaji_trt.so asks for them by soname, which then
@@ -33,7 +33,8 @@ pub fn load_aji(dir: &Path) -> Result<Aji, String> {
 /// Which backend to run on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BackendChoice {
-    /// TensorRT if an NVIDIA GPU and the TensorRT runtime are there, else DirectML.
+    /// TensorRT if an NVIDIA GPU it runs on (`nvml::TRT_MIN_COMPUTE`) and the TensorRT runtime
+    /// are there, else DirectML.
     Auto,
     TensorRt,
     DirectMl,
@@ -72,6 +73,29 @@ impl BackendChoice {
 
 pub fn backend_name(b: Backend) -> &'static str {
     b.label()
+}
+
+/// A backend's devices split into the ones it can upscale on and the ones too old for it:
+/// TensorRT and TensorRT-RTX don't run below `nvml::TRT_MIN_COMPUTE`, so such a GPU counts as no
+/// NVIDIA GPU there (Auto goes on to DirectML). DirectML runs on every device it lists.
+pub fn split_devices(backend: Backend, devices: Vec<Device>) -> (Vec<Device>, Vec<Device>) {
+    if backend == Backend::DirectMl {
+        return (devices, Vec::new());
+    }
+    devices.into_iter().partition(|d| d.compute_capability.is_none_or(|(major, minor)| nvml::trt_capable(major, minor)))
+}
+
+/// Why TensorRT (or TensorRT-RTX) can't run on the GPUs in `old`, which are all too old for it.
+pub fn too_old_message(old: &[Device]) -> String {
+    let found: Vec<String> = old
+        .iter()
+        .map(|d| match d.compute_capability {
+            Some((major, minor)) => format!("{} is compute {major}.{minor}", d.name),
+            None => d.name.clone(),
+        })
+        .collect();
+    let instead = if cfg!(windows) { "Use DirectML instead." } else { "On Linux mangajanai runs on TensorRT only." };
+    format!("{}; {}. {instead}", nvml::trt_needs(), found.join(", "))
 }
 
 /// A chain's model file: as given if it's a path that exists, else looked up by name in the models
@@ -124,18 +148,32 @@ impl Upscaler {
         let aji = load_aji(aji_dir)?;
         let trtexec_env = trtexec(aji_dir);
         let mut err = String::from("no compatible GPU found");
+        let mut too_old = false;
         for &backend in choice.candidates() {
             if choice == BackendChoice::TensorRtRtx && backend == Backend::TensorRt {
+                if too_old {
+                    break; // TensorRT doesn't run on these GPUs either
+                }
                 progress::backend_fallback(None, &err);
             }
-            let devices = match aji.devices(backend) {
-                Ok(d) if !d.is_empty() => d,
-                Ok(_) => continue,
+            let (devices, old) = match aji.devices(backend) {
+                Ok(d) => split_devices(backend, d),
                 Err(e) => {
                     err = format!("{}: {e}", backend_name(backend));
                     continue;
                 }
             };
+            // The GPU asked for, or every GPU there, is too old for this backend: Auto goes on to
+            // DirectML, and TensorRT on its own says why it can't run.
+            let chosen_old = old.iter().find(|d| device_id != 0 && d.id == device_id);
+            if chosen_old.is_some() || (devices.is_empty() && !old.is_empty()) {
+                err = too_old_message(chosen_old.map_or(&old[..], std::slice::from_ref));
+                too_old = true;
+                continue;
+            }
+            if devices.is_empty() {
+                continue;
+            }
             let device = devices.iter().find(|d| d.id == device_id).unwrap_or(&devices[0]);
             match open_context(&aji, backend, device.id, &cache_dir, &trtexec_env) {
                 Ok(ctx) => {
@@ -392,10 +430,10 @@ fn load_model(ctx: &Context, backend: Backend, path: &Path, tile: u32, overlap: 
 /// The devices of one backend, as JSON for the GUI's device list:
 /// `[{"id", "name", "vram", "compute_capability"}]` (`id` as a decimal string — it's a full 64-bit
 /// value; `compute_capability` as "major.minor", null on DirectML). An unloadable backend is an
-/// empty list.
+/// empty list, and GPUs too old for TensorRT aren't on its lists ([`split_devices`]).
 pub fn devices_json(aji_dir: &Path, backend: Backend) -> Result<String, String> {
     let aji = load_aji(aji_dir)?;
-    let devices = aji.devices(backend).unwrap_or_default();
+    let (devices, _) = split_devices(backend, aji.devices(backend).unwrap_or_default());
     let list: Vec<_> = devices
         .iter()
         .map(|d| {
@@ -444,7 +482,10 @@ fn hint_device(aji_dir: &Path, choice: BackendChoice, device_id: u64) -> Option<
         }
     };
     choice.candidates().iter().find_map(|&b| {
-        let devices = aji.devices(b).ok()?;
+        let (devices, old) = split_devices(b, aji.devices(b).ok()?);
+        if old.iter().any(|d| device_id != 0 && d.id == device_id) {
+            return None; // as in Upscaler::open: on to the next backend
+        }
         let device = devices.iter().find(|d| d.id == device_id).or(devices.first())?;
         Some((b, device.clone()))
     })
@@ -505,5 +546,34 @@ mod tests {
         assert_eq!(resolve_in(a.to_str().unwrap(), &dirs), Some(a));
         assert_eq!(resolve_in("missing.onnx", &dirs), None);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // ---- GPUs too old for TensorRT (compute capability below 7.5) ----------------------------
+
+    fn device(id: u64, name: &str, cc: Option<(i32, i32)>) -> Device {
+        Device { id, name: name.into(), vram_bytes: 8 << 30, compute_capability: cc }
+    }
+
+    #[test]
+    fn pre_turing_gpus_are_off_the_tensorrt_lists() {
+        let list = || vec![device(1, "GTX 1080", Some((6, 1))), device(2, "RTX 3080", Some((8, 6))), device(3, "Titan V", Some((7, 0)))];
+        let ids = |v: &[Device]| v.iter().map(|d| d.id).collect::<Vec<_>>();
+        for b in [Backend::TensorRt, Backend::TensorRtRtx] {
+            let (ok, old) = split_devices(b, list());
+            assert_eq!((ids(&ok), ids(&old)), (vec![2], vec![1, 3]), "{b:?}");
+        }
+        // DirectML runs on all of them (it lists no compute capability, but don't rely on that)
+        let (ok, old) = split_devices(Backend::DirectMl, list());
+        assert_eq!((ids(&ok), ids(&old)), (vec![1, 2, 3], vec![]));
+        // a device without a compute capability isn't judged
+        let (ok, _) = split_devices(Backend::TensorRt, vec![device(4, "?", None)]);
+        assert_eq!(ids(&ok), [4]);
+    }
+
+    #[test]
+    fn too_old_message_says_why() {
+        let m = too_old_message(&[device(1, "NVIDIA GeForce GTX 1080", Some((6, 1)))]);
+        assert!(m.starts_with("TensorRT needs an NVIDIA GeForce RTX 20 / GTX 16 series or newer GPU (compute capability 7.5+); NVIDIA GeForce GTX 1080 is compute 6.1. "), "{m}");
+        assert!(m.ends_with(if cfg!(windows) { "Use DirectML instead." } else { "On Linux mangajanai runs on TensorRT only." }), "{m}");
     }
 }

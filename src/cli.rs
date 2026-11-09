@@ -785,11 +785,17 @@ fn device_ids(aji_dir: &Path, backend: BackendChoice, spec: Option<&str>) -> Res
         return Ok(vec![0]);
     }
     let aji = upscaler::load_aji(aji_dir).map_err(|e| format!("loading libaji from {}: {e}", aji_dir.display()))?;
+    // GPUs too old for TensorRT aren't on its list (as in `devices`), so Auto takes DirectML's
+    let mut too_old = Vec::new();
     let devices = backend
         .candidates()
         .iter()
-        .find_map(|&b| aji.devices(b).ok().filter(|d| !d.is_empty()))
-        .ok_or("no compatible GPU found")?;
+        .find_map(|&b| {
+            let (devices, old) = upscaler::split_devices(b, aji.devices(b).ok()?);
+            too_old.extend(old);
+            Some(devices).filter(|d| !d.is_empty())
+        })
+        .ok_or_else(|| if too_old.is_empty() { "no compatible GPU found".to_string() } else { upscaler::too_old_message(&too_old) })?;
     if spec.eq_ignore_ascii_case("all") {
         return Ok(devices.iter().map(|d| d.id).collect());
     }
@@ -800,6 +806,8 @@ fn device_ids(aji_dir: &Path, backend: BackendChoice, spec: Option<&str>) -> Res
             devices[n as usize].id
         } else if devices.iter().any(|d| d.id == n) {
             n
+        } else if let Some(d) = too_old.iter().find(|d| d.id == n) {
+            return Err(format!("--device: {}", upscaler::too_old_message(std::slice::from_ref(d))));
         } else {
             return Err(format!("--device: no GPU {n} (there are {}; see `devices`)", devices.len()));
         };
@@ -903,12 +911,18 @@ fn devices(flags: &Flags) -> Result<i32, String> {
         None => vec![Backend::TensorRt],
     };
     for b in backends {
-        match aji.devices(b) {
-            Ok(list) if !list.is_empty() => {
+        match aji.devices(b).map(|list| upscaler::split_devices(b, list)) {
+            Ok((list, old)) if !list.is_empty() || !old.is_empty() => {
                 println!("{}:", b.label());
                 for (i, d) in list.iter().enumerate() {
                     let cc = d.compute_capability.map_or(String::new(), |(a, b)| format!(", compute {a}.{b}"));
                     println!("  {i}  {}  ({:.1} GB{cc}; id {})", d.name, d.vram_bytes as f64 / (1u64 << 30) as f64, d.id);
+                }
+                // not numbered: this backend can't run on them
+                let (major, minor) = crate::nvml::TRT_MIN_COMPUTE;
+                for d in &old {
+                    let cc = d.compute_capability.map_or(String::new(), |(a, b)| format!("compute {a}.{b}; "));
+                    println!("  -  {}  ({cc}too old for {}, which needs compute {major}.{minor}+)", d.name, b.label());
                 }
             }
             Ok(_) => println!("{}: no devices", b.label()),

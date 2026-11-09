@@ -95,6 +95,13 @@ release's assets and index). In store mode:
 - `setup.json` records the mode, and a plain `setup` stays in it.
 - `setup --remove` drops the ref; the app's uninstaller runs it before deleting the folder.
 
+`mangajanai store location [--json] | move FOLDER | move --default | reset` (`src/store.rs`) are
+aji-runtime's `location`, `move` and `reset` through the library, with the same output and
+refusals, for apps that don't link aji-runtime (yosh's Storage row). `store move --progress lines`
+prints `STORE_WAIT`, `STORE_MOVE <copied> <total>`, `STORE_DONE`. While a moved store's folder is
+missing, setup in store mode, `devices`, `bench` and an upscale with `aji-runtime.json` beside
+libaji stop early with "isn't available. Is its drive connected?" (`store::check_available`).
+
 `AJI_RUNTIME_STORE` points the store elsewhere: use it for tests, never the real one. Without
 `--store` (a portable CLI) nothing changes.
 

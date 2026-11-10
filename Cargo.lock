@@ -43,8 +43,8 @@ dependencies = [
 
 [[package]]
 name = "aji-runtime"
-version = "0.2.0"
-source = "git+https://github.com/the-database/aji-runtime?rev=e7a480309e60b8aad71b4625f633d58888628ade#e7a480309e60b8aad71b4625f633d58888628ade"
+version = "0.2.1"
+source = "git+https://github.com/the-database/aji-runtime?rev=7d7a0ed386c3567d6979b401d4a42c04a50c2a08#7d7a0ed386c3567d6979b401d4a42c04a50c2a08"
 dependencies = [
  "junction",
  "libloading",

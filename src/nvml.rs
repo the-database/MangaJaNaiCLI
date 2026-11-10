@@ -21,6 +21,15 @@ pub fn trt_capable(major: i32, minor: i32) -> bool {
     (major, minor) >= TRT_MIN_COMPUTE
 }
 
+/// Whether TensorRT-RTX is the default on a GPU of this compute capability, as MangaJaNai GUI and
+/// yosh decide it: the consumer GPUs TensorRT-RTX supports, Turing (7.5, RTX 20 / GTX 16),
+/// consumer Ampere (8.6), Ada (8.9), Blackwell (12.x) and newer. Not the data-center parts (8.0,
+/// 9.0, 10.0), which TensorRT-RTX 1.7 doesn't support. `setup` installs it there, and Auto tries
+/// it first there.
+pub fn trtrtx_default(major: i32, minor: i32) -> bool {
+    matches!((major, minor), (7, 5) | (8, 6) | (8, 9)) || major >= 12
+}
+
 /// "TensorRT needs an NVIDIA GeForce RTX 20 / GTX 16 series or newer GPU (compute capability 7.5+)"
 pub fn trt_needs() -> String {
     let (major, minor) = TRT_MIN_COMPUTE;

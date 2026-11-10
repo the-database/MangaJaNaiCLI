@@ -124,7 +124,8 @@ mangajanai bench 2x_model.onnx --tile 512 --iters 20
 - **TensorRT-RTX** (`--backend tensorrt-rtx`, Windows, RTX 20 series and newer) builds engines in
   seconds instead of minutes. Its speed relative to TensorRT depends on the model: on an RTX 5090
   it was ~25% faster with MangaJaNai ESRGAN and about the same with FDAT_M. A model that fails on
-  it falls back to TensorRT. Auto is TensorRT, then DirectML.
+  it falls back to TensorRT. Auto tries it first on the GPUs `setup` installs it for (RTX 20 /
+  GTX 16 series and newer), then TensorRT, then DirectML, as MangaJaNai GUI and yosh do.
 - **Tile size** is one engine per size. 512 is a good default; larger tiles help light models.
   Tiles overlap by 128 px and blend only at the centre of the overlap, which keeps generated
   screentone seamless; a smaller `--overlap` is faster but can show seams.

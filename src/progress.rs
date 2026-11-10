@@ -202,12 +202,13 @@ pub fn engine_ready(model: &str) {
     }
 }
 
-/// TensorRT-RTX failed and TensorRT runs instead: at start (`model` None, for the whole run) or
-/// for one model (the others stay on TensorRT-RTX). The GUI shows it as a warning.
-pub fn backend_fallback(model: Option<&str>, why: &str) {
+/// TensorRT-RTX failed and `instead` runs instead: at start (`model` None, for the whole run) or
+/// for one model (the others stay on TensorRT-RTX). `instead` is TensorRT, except under Auto at
+/// start, where it can be DirectML. The GUI shows it as a warning.
+pub fn backend_fallback(model: Option<&str>, why: &str, instead: &str) {
     let msg = match model {
-        None => format!("TensorRT-RTX failed ({why}); using TensorRT instead"),
-        Some(m) => format!("TensorRT-RTX failed for {m} ({why}); using TensorRT for it"),
+        None => format!("TensorRT-RTX failed ({why}); using {instead} instead"),
+        Some(m) => format!("TensorRT-RTX failed for {m} ({why}); using {instead} for it"),
     };
     match human() {
         Some(mut h) => h.say(&format!("warning: {msg}")),

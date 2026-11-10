@@ -628,13 +628,22 @@ pub fn total(inputs: &[Input], output: &Output, job: &Job) -> u64 {
     count(&planned, output)
 }
 
+/// Threads in each of the two CPU pools (decode/prepare and resize/encode), unless `--workers`
+/// sets it: half the CPU's threads up to 8, and at least four per inference thread (at most all
+/// the CPU's threads). One GPU doesn't outrun 8 encoders, but several do: on 4x RTX 5090 (48
+/// threads, 1050x1500 pages at 2x) 8 workers held WebP to 14.9 pages/s, lossy JPEG XL to 9.5 and
+/// lossless JPEG XL to 4.3; 16 gave 17.0, 16.8 (both GPU-bound) and 8.3. On one GPU, 8 and 32 ran
+/// within 2% of each other. Each worker holds an image, so more workers use more memory.
+pub fn workers(threads: usize, inference_threads: usize) -> usize {
+    (threads / 2).clamp(2, 8).max(4 * inference_threads).min(threads.max(2))
+}
+
 /// Run the batch over `inputs`, in order. Each of `upscalers` (one per GPU) gets an inference
 /// thread that opens it lazily (so a run that needs no model never loads the runtime) and then takes
-/// prepared images as it frees up.
-pub fn run(inputs: Vec<Input>, output: Output, job: Job, upscalers: Vec<OpenUpscaler>, pause: Arc<Pause>) {
+/// prepared images as it frees up. `workers` sizes the CPU pools (see [`workers`]).
+pub fn run(inputs: Vec<Input>, output: Output, job: Job, upscalers: Vec<OpenUpscaler>, pause: Arc<Pause>, workers: Option<usize>) {
     let threads = thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
-    let gpus = upscalers.len().max(1);
-    let n = (threads / 2).clamp(2, 8).max(2 * gpus).min(threads.max(2));
+    let n = workers.unwrap_or_else(|| self::workers(threads, upscalers.len().max(1))).max(1);
     let job = Arc::new(job);
     let format_ext = job.format.ext().to_string();
 
@@ -719,6 +728,17 @@ fn needs_model(work: &Work) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn workers_are_half_the_threads_up_to_8_and_four_per_inference_thread() {
+        assert_eq!(workers(32, 1), 8, "one GPU: half the threads, at most 8");
+        assert_eq!(workers(8, 1), 4);
+        assert_eq!(workers(2, 1), 2);
+        assert_eq!(workers(1, 1), 2);
+        assert_eq!(workers(48, 2), 8);
+        assert_eq!(workers(48, 4), 16, "four per inference thread");
+        assert_eq!(workers(12, 4), 12, "but no more than the CPU's threads");
+    }
 
     #[test]
     fn a_pause_waits_until_resumed_and_lets_go_of_the_upscaler() {

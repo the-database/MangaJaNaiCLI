@@ -125,6 +125,12 @@ mangajanai bench 2x_model.onnx --tile 512 --iters 20
 - **Tile size** is one engine per size. 512 is a good default; larger tiles help light models.
   Tiles overlap by 128 px and blend only at the centre of the overlap, which keeps generated
   screentone seamless; a smaller `--overlap` is faster but can show seams.
+- **`--workers <n>`** (`[output] workers`) sets how many threads decode and encode images. The
+  default, half the CPU's threads up to 8 and at least 4 per GPU, keeps one GPU busy with any
+  format. Several GPUs can outrun the encoders: on 4x RTX 5090 (48 threads, 1050x1500 pages at
+  2x), lossless JPEG XL ran at 4.3 pages/s with 8 workers, 8.3 with 16, 11.2 with 24 and 14.3
+  with 48 (WebP and lossy JPEG XL reach the GPUs' 17 pages/s at 16). Each worker holds an image,
+  so more workers use more memory (about 180 MB each for 3360x4800 lossless JPEG XL pages).
 - **`--streams 2`** runs two inference threads per GPU. It doubles VRAM. On TensorRT and
   TensorRT-RTX, current libaji tiles on the GPU, so this rarely helps any more. DirectML still
   tiles on the CPU, where one image's tiling can overlap the other's inference, so it may help

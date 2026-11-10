@@ -62,6 +62,9 @@ Saving:
   --suffix <text>           appended to file names    --filename <template>   %filename% = input name
   --skip-existing           keep outputs that exist (default)    --overwrite   redo them
   --skip-written-since <t>  also keep outputs written since t (Unix seconds): resume a run
+  --workers <n>             threads that decode and encode images (default: half the CPU's
+                            threads up to 8, at least 4 per GPU); fewer use less memory, more
+                            help slow formats like lossless jxl keep several GPUs busy
 
 GPU:
   --backend <b>             auto (default) | tensorrt | directml | tensorrt-rtx
@@ -163,6 +166,7 @@ struct Flags {
     backend: Option<BackendChoice>,
     device: Option<String>,
     streams: Option<u32>,
+    workers: Option<usize>,
     tile: Option<u32>,
     overlap: Option<u32>,
     even_tiles: Option<bool>,
@@ -256,6 +260,7 @@ fn parse_flags(args: Vec<String>) -> Result<Flags, String> {
             "--backend" => f.backend = Some(BackendChoice::parse(&value(&key)?)?),
             "--device" | "--devices" => f.device = Some(value(&key)?),
             "--streams" => f.streams = Some(num::<u32>(&key, &value(&key)?)?.clamp(1, 8)),
+            "--workers" => f.workers = Some(num::<usize>(&key, &value(&key)?)?.clamp(1, 256)),
             "--tile" => f.tile = Some(num(&key, &value(&key)?)?),
             "--overlap" => f.overlap = Some(num(&key, &value(&key)?)?),
             "--even-tiles" => f.even_tiles = Some(true),
@@ -460,7 +465,7 @@ fn gui_run(flags: Flags) -> i32 {
     if flags.control_stdin {
         listen_for_pause(pause.clone());
     }
-    run::run(vec![input], output, job, vec![open], pause);
+    run::run(vec![input], output, job, vec![open], pause, flags.workers);
     progress::finish(start.elapsed());
     0
 }
@@ -606,6 +611,7 @@ struct Plan {
     backend: BackendChoice,
     device: Option<String>,
     streams: u32,
+    workers: Option<usize>,
     overlap: Option<u32>,
     even_tiles: bool,
     cache_dir: Option<PathBuf>,
@@ -767,6 +773,7 @@ fn resolve(flags: &Flags) -> Result<Plan, String> {
         backend,
         device: flags.device.clone().or(file.and_then(|f| f.gpu.devices.clone())),
         streams: flags.streams.or(file.and_then(|f| f.gpu.streams)).unwrap_or(1).clamp(1, 8),
+        workers: flags.workers.or(file.and_then(|f| f.save.workers)).map(|w| w.clamp(1, 256)),
         overlap: flags.overlap.or(file.and_then(|f| f.gpu.overlap)),
         even_tiles: flags.even_tiles.or(file.and_then(|f| f.gpu.even_tiles)).unwrap_or(false),
         cache_dir: default_cache_dir(flags.cache_dir.clone().or(file.and_then(|f| f.gpu.cache_dir.as_deref().map(|c| config::rel(&base, c))))),
@@ -883,7 +890,7 @@ fn upscale(flags: Flags) -> Result<i32, String> {
     if flags.control_stdin {
         listen_for_pause(pause.clone());
     }
-    run::run(plan.inputs, plan.output, plan.job, openers, pause);
+    run::run(plan.inputs, plan.output, plan.job, openers, pause, plan.workers);
     let failed = progress::finish(start.elapsed());
     Ok(if failed > 0 { 1 } else { 0 })
 }

@@ -44,6 +44,9 @@ suffix =
 filename =
 ; Keep results that already exist instead of redoing them (yes or no).
 skip_existing = yes
+; Threads that decode and encode images (empty = half the CPU's threads up to 8, at least 4 per
+; GPU). Fewer use less memory; more help slow formats like lossless jxl keep several GPUs busy.
+workers =
 
 [model]
 ; Which model runs. Pick one of these three, or write [rule] sections (at the end of this file):
@@ -135,6 +138,7 @@ pub struct Save {
     pub suffix: Option<String>,
     pub filename: Option<String>,
     pub skip_existing: Option<bool>,
+    pub workers: Option<usize>,
 }
 
 #[derive(Debug, Default)]
@@ -369,7 +373,8 @@ impl File {
                     f.save.suffix = r.string("suffix")?;
                     f.save.filename = r.string("filename")?;
                     f.save.skip_existing = r.switch("skip_existing")?;
-                    r.finish(&["folder", "format", "quality", "lossless", "suffix", "filename", "skip_existing"])?;
+                    f.save.workers = r.number("workers", "a number like 8 or 16")?;
+                    r.finish(&["folder", "format", "quality", "lossless", "suffix", "filename", "skip_existing", "workers"])?;
                 }
                 "model" => {
                     f.model = r.string("file")?;

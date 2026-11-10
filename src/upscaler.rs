@@ -39,7 +39,8 @@ pub enum BackendChoice {
     TensorRt,
     DirectMl,
     /// TensorRT for RTX (opt-in, experimental; needs aji_trtrtx.dll beside aji.dll), falling
-    /// back to TensorRT when it can't start, and per model when one fails to build.
+    /// back to TensorRT when it can't start, and per model when one fails to load or build,
+    /// except for lack of GPU memory.
     TensorRtRtx,
 }
 
@@ -229,8 +230,11 @@ impl Upscaler {
 
     /// The loaded model for `path` at `tile`, loading it (and waiting out a first-use TensorRT
     /// engine build, reported on stdout) if needed. On TensorRT-RTX, a model that fails to load
-    /// or build is retried on TensorRT (that context opens the first time it's needed). The first
-    /// load of a file prints its precision hint, if it has one, before anything else about it.
+    /// or build is retried on TensorRT (that context opens the first time it's needed), unless it
+    /// ran out of GPU memory: a second CUDA context and another copy of the model would need
+    /// more, and libaji's message (what it needed, how much is free) is the useful error. The
+    /// first load of a file prints its precision hint, if it has one, before anything else about
+    /// it.
     fn model(&mut self, path: &Path, tile: u32) -> Result<&Model, String> {
         let key = (path.to_path_buf(), tile);
         if !self.models.contains_key(&key) {
@@ -247,7 +251,7 @@ impl Upscaler {
             let model = match load_model(&self.ctx, self.backend, path, tile, self.overlap, self.even_tiles, &name) {
                 Ok(m) => m,
                 Err(e) => {
-                    let Some(fb) = self.fallback.as_mut() else {
+                    let Some(fb) = self.fallback.as_mut().filter(|_| !yosh_image::aji::is_out_of_memory(&e)) else {
                         return Err(format!("{name}: {e}"));
                     };
                     progress::backend_fallback(Some(&name), &e);

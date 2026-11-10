@@ -216,10 +216,9 @@ pub fn store_model_dirs(dir: &Path) -> Vec<PathBuf> {
     aji_runtime::app_packs(&store, &mode.app_id).into_iter().filter(|(m, _)| m.kind == "models").map(|(_, d)| d).collect()
 }
 
-/// TensorRT-RTX's default GPUs, as MangaJaNai GUI and yosh decide it: Turing (7.5), consumer
-/// Ampere (8.6), Ada (8.9) and Blackwell (12.x).
+/// TensorRT-RTX's default GPUs ([`nvml::trtrtx_default`]).
 fn trtrtx_default(g: &nvml::Gpu) -> bool {
-    matches!((g.major, g.minor), (7, 5) | (8, 6) | (8, 9)) || g.major >= 12
+    nvml::trtrtx_default(g.major, g.minor)
 }
 
 fn mb(b: u64) -> String {

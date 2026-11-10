@@ -33,8 +33,10 @@ pub fn load_aji(dir: &Path) -> Result<Aji, String> {
 /// Which backend to run on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BackendChoice {
-    /// TensorRT if an NVIDIA GPU it runs on (`nvml::TRT_MIN_COMPUTE`) and the TensorRT runtime
-    /// are there, else DirectML.
+    /// On Windows, TensorRT-RTX on a GPU where it's the default (`nvml::trtrtx_default`) if it's
+    /// installed, then TensorRT if an NVIDIA GPU it runs on (`nvml::TRT_MIN_COMPUTE`) and the
+    /// TensorRT runtime are there, else DirectML: the order MangaJaNai GUI's and yosh's Auto use.
+    /// Off Windows, TensorRT.
     Auto,
     TensorRt,
     DirectMl,
@@ -46,15 +48,24 @@ pub enum BackendChoice {
 
 impl BackendChoice {
     /// The backends `Upscaler::open` tries, in order. Off Windows there is only TensorRT, so Auto
-    /// reports TensorRT's own error there instead of a DirectML one.
+    /// reports TensorRT's own error there instead of a DirectML one. Auto's TensorRT-RTX is tried
+    /// only on a GPU it suits ([`BackendChoice::runs_on`]).
     pub fn candidates(self) -> &'static [Backend] {
         match self {
-            BackendChoice::Auto if cfg!(windows) => &[Backend::TensorRt, Backend::DirectMl],
+            BackendChoice::Auto if cfg!(windows) => &[Backend::TensorRtRtx, Backend::TensorRt, Backend::DirectMl],
             BackendChoice::Auto => &[Backend::TensorRt],
             BackendChoice::TensorRt => &[Backend::TensorRt],
             BackendChoice::DirectMl => &[Backend::DirectMl],
             BackendChoice::TensorRtRtx => &[Backend::TensorRtRtx, Backend::TensorRt],
         }
+    }
+
+    /// Whether this choice runs `backend` on `device`: Auto takes TensorRT-RTX only where it's the
+    /// default ([`nvml::trtrtx_default`]), and goes on to TensorRT elsewhere without a word.
+    pub fn runs_on(self, backend: Backend, device: &Device) -> bool {
+        self != BackendChoice::Auto
+            || backend != Backend::TensorRtRtx
+            || device.compute_capability.is_some_and(|(major, minor)| nvml::trtrtx_default(major, minor))
     }
 
     pub fn parse(s: &str) -> Result<Self, String> {
@@ -150,12 +161,14 @@ impl Upscaler {
         let trtexec_env = trtexec(aji_dir);
         let mut err = String::from("no compatible GPU found");
         let mut too_old = false;
+        // Auto: why TensorRT-RTX, tried first, didn't start (reported once another backend has)
+        let mut rtx_failed: Option<String> = None;
         for &backend in choice.candidates() {
             if choice == BackendChoice::TensorRtRtx && backend == Backend::TensorRt {
                 if too_old {
                     break; // TensorRT doesn't run on these GPUs either
                 }
-                progress::backend_fallback(None, &err);
+                progress::backend_fallback(None, &err, "TensorRT");
             }
             let (devices, old) = match aji.devices(backend) {
                 Ok(d) => split_devices(backend, d),
@@ -176,8 +189,14 @@ impl Upscaler {
                 continue;
             }
             let device = devices.iter().find(|d| d.id == device_id).unwrap_or(&devices[0]);
+            if !choice.runs_on(backend, device) {
+                continue;
+            }
             match open_context(&aji, backend, device.id, &cache_dir, &trtexec_env) {
                 Ok(ctx) => {
+                    if let Some(why) = &rtx_failed {
+                        progress::backend_fallback(None, why, backend_name(backend));
+                    }
                     let description = format!("{} on {}", backend_name(backend), device.name);
                     let fallback = (backend == Backend::TensorRtRtx).then(|| Fallback {
                         aji: aji.clone(),
@@ -200,7 +219,12 @@ impl Upscaler {
                         description,
                     });
                 }
-                Err(e) => err = format!("{}: {e}", backend_name(backend)),
+                Err(e) => {
+                    err = format!("{}: {e}", backend_name(backend));
+                    if choice == BackendChoice::Auto && backend == Backend::TensorRtRtx {
+                        rtx_failed = Some(err.clone());
+                    }
+                }
             }
         }
         Err(err)
@@ -254,7 +278,7 @@ impl Upscaler {
                     let Some(fb) = self.fallback.as_mut().filter(|_| !yosh_image::aji::is_out_of_memory(&e)) else {
                         return Err(format!("{name}: {e}"));
                     };
-                    progress::backend_fallback(Some(&name), &e);
+                    progress::backend_fallback(Some(&name), &e, "TensorRT");
                     let ctx = fb.context()?;
                     load_model(&ctx, Backend::TensorRt, path, tile, self.overlap, self.even_tiles, &name).map_err(|e| format!("{name}: {e}"))?
                 }
@@ -491,7 +515,7 @@ fn hint_device(aji_dir: &Path, choice: BackendChoice, device_id: u64) -> Option<
             return None; // as in Upscaler::open: on to the next backend
         }
         let device = devices.iter().find(|d| d.id == device_id).or(devices.first())?;
-        Some((b, device.clone()))
+        choice.runs_on(b, device).then(|| (b, device.clone()))
     })
 }
 
@@ -572,6 +596,32 @@ mod tests {
         // a device without a compute capability isn't judged
         let (ok, _) = split_devices(Backend::TensorRt, vec![device(4, "?", None)]);
         assert_eq!(ids(&ok), [4]);
+    }
+
+    #[test]
+    fn auto_tries_tensorrt_rtx_first_on_windows_where_it_is_the_default() {
+        let auto = BackendChoice::Auto.candidates();
+        if cfg!(windows) {
+            assert_eq!(auto, [Backend::TensorRtRtx, Backend::TensorRt, Backend::DirectMl]);
+        } else {
+            assert_eq!(auto, [Backend::TensorRt]);
+        }
+        // the GPUs MangaJaNai GUI and yosh default to TensorRT-RTX on
+        for cc in [(7, 5), (8, 6), (8, 9), (12, 0), (12, 1), (13, 0)] {
+            assert!(BackendChoice::Auto.runs_on(Backend::TensorRtRtx, &device(1, "", Some(cc))), "{cc:?}");
+        }
+        // pre-Turing, the data-center parts TensorRT-RTX doesn't support, and a device that
+        // reports no compute capability
+        for cc in [Some((6, 1)), Some((7, 0)), Some((8, 0)), Some((8, 7)), Some((9, 0)), Some((10, 0)), Some((11, 0)), None] {
+            assert!(!BackendChoice::Auto.runs_on(Backend::TensorRtRtx, &device(1, "", cc)), "{cc:?}");
+        }
+        // Auto's other backends, and every explicit choice, run on whatever they list
+        for cc in [Some((9, 0)), None] {
+            let d = device(1, "", cc);
+            assert!(BackendChoice::Auto.runs_on(Backend::TensorRt, &d) && BackendChoice::Auto.runs_on(Backend::DirectMl, &d));
+            assert!(BackendChoice::TensorRtRtx.runs_on(Backend::TensorRtRtx, &d));
+            assert!(BackendChoice::TensorRt.runs_on(Backend::TensorRt, &d));
+        }
     }
 
     #[test]

@@ -2557,7 +2557,7 @@ checksum = "7a5a4b21e1a62b67a2970e6831bc091d7b87e119e7f9791aef9702e3bef04448"
 [[package]]
 name = "yosh-image"
 version = "0.1.0"
-source = "git+https://github.com/the-database/yosh?rev=455fc397b34a6b0ff28a1c0dc9fe6128b763f40a#455fc397b34a6b0ff28a1c0dc9fe6128b763f40a"
+source = "git+https://github.com/the-database/yosh?rev=cf2d3e27528247ff0c847f2c9916479e97d1d5d3#cf2d3e27528247ff0c847f2c9916479e97d1d5d3"
 dependencies = [
  "chardetng",
  "encoding_rs",

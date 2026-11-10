@@ -23,7 +23,13 @@ MangaJaNaiCLI: one Rust program under two names (`src/cli.rs::main`):
 
 Pipeline (`run.rs`): walk inputs → parallel prepare (decode, gray detection, chain choice, pre-resize,
 levels; `process.rs`) → one inference thread per GPU stream (`upscaler.rs`, libaji's image ABI) →
-parallel finish (final resize, encode; `encode.rs`) → writes in input order.
+parallel finish (final resize, encode; `encode.rs`) → writes in input order. An animation
+(`yosh_image::decode::animation`: GIF/WebP/APNG/JPEG XL/AVIF with more than one frame) skips the
+pipeline: `prepare_stage` makes it a raw copy (`Done::Animated`), an archive entry under its own name,
+a file under its assigned output name with the source's extension. It logs `<input>: animated <kind>,
+copied unchanged ...` and prints the same `PROGRESS=` line as an upscaled image, so the GUI's counts
+hold. yosh-image's decoders apply EXIF orientation, and the encoders write no metadata, so nothing
+can rotate an output twice.
 
 ## Dependencies
 

@@ -44,6 +44,9 @@ suffix =
 filename =
 ; Keep results that already exist instead of redoing them (yes or no).
 skip_existing = yes
+; Threads that decode and encode images (empty = half the CPU's threads up to 8, at least 4 per
+; GPU). Fewer use less memory; more help slow formats like lossless jxl keep several GPUs busy.
+workers =
 
 [model]
 ; Which model runs. Pick one of these three, or write [rule] sections (at the end of this file):
@@ -135,6 +138,7 @@ pub struct Save {
     pub suffix: Option<String>,
     pub filename: Option<String>,
     pub skip_existing: Option<bool>,
+    pub workers: Option<usize>,
 }
 
 #[derive(Debug, Default)]
@@ -369,7 +373,8 @@ impl File {
                     f.save.suffix = r.string("suffix")?;
                     f.save.filename = r.string("filename")?;
                     f.save.skip_existing = r.switch("skip_existing")?;
-                    r.finish(&["folder", "format", "quality", "lossless", "suffix", "filename", "skip_existing"])?;
+                    f.save.workers = r.number("workers", "a number like 8 or 16")?;
+                    r.finish(&["folder", "format", "quality", "lossless", "suffix", "filename", "skip_existing", "workers"])?;
                 }
                 "model" => {
                     f.model = r.string("file")?;
@@ -536,11 +541,22 @@ mod tests {
         assert_eq!(f.save.quality, Some(90));
         assert_eq!(f.save.lossless, Some(false));
         assert_eq!(f.save.suffix, None, "empty = not set");
+        assert_eq!(f.save.workers, None, "empty = the default");
         assert_eq!(f.preset, None);
         assert_eq!(f.gpu.tile, Some(512));
         assert_eq!(f.gpu.devices.as_deref(), Some("first"));
         assert_eq!(f.resize.target().unwrap(), None);
         assert!(f.rule.is_empty(), "the example rule is commented out");
+    }
+
+    #[test]
+    fn workers_is_a_number() {
+        assert_eq!(File::parse("[output]
+workers = 24
+").unwrap().save.workers, Some(24));
+        assert!(File::parse("[output]
+workers = many
+").is_err());
     }
 
     #[test]

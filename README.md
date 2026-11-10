@@ -14,6 +14,9 @@ The command is `mangajanai`. The same program is MangaJaNai GUI's upscaling back
 
 - Images (png jpg webp bmp avif tif jxl), archives (zip cbz rar cbr 7z cb7, written back as .cbz in page
   order) and folders (recursive; the output keeps the subfolders).
+- Animations (WebP, APNG, JPEG XL or AVIF, and GIF inside archives, with more than one frame) are
+  copied unchanged, keeping their format, instead of being upscaled as one frame. Images with an EXIF orientation (JPEG, PNG,
+  WebP, TIFF) are upscaled upright.
 - One model for everything, MangaJaNai's per-page rules (gray pages by height, color pages), your own
   rules, or a workflow exported from MangaJaNai GUI.
 - Resize after the model to a scale, width, height or a box; webp or jxl (lossy/lossless), png, jpg,

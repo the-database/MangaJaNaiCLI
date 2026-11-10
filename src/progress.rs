@@ -28,6 +28,7 @@ pub fn set_human(verbose: bool, total: Option<u64>) {
         total,
         done: 0,
         skipped: 0,
+        animated: 0,
         errors: 0,
         start: Instant::now(),
         first_done: None,
@@ -46,6 +47,8 @@ struct Human {
     total: Option<u64>,
     done: u64,
     skipped: u64,
+    /// Animations copied unchanged (counted in `done` too).
+    animated: u64,
     errors: u64,
     start: Instant,
     /// When the first item finished: the rate is measured from there, so a first-use engine build
@@ -260,6 +263,25 @@ pub fn skipped(path: &std::path::Path) {
     }
 }
 
+/// An animation (`kind`: "GIF", "WebP", ...) copied unchanged instead of upscaled; `to` is the
+/// copy's path for a file, `None` for an archive entry (kept under its name). A log line for the GUI;
+/// on the command line a count in the summary, and the line with `--verbose`.
+pub fn animated_copied(what: &str, kind: &str, to: Option<&std::path::Path>) {
+    let msg = match to {
+        Some(to) => format!("{what}: animated {kind}, copied unchanged to {}", to.display()),
+        None => format!("{what}: animated {kind}, copied unchanged"),
+    };
+    match human() {
+        Some(mut h) => {
+            h.animated += 1;
+            if h.verbose {
+                h.say(&msg);
+            }
+        }
+        None => line(&msg),
+    }
+}
+
 /// Detail: always a line for the GUI, on the command line only with `--verbose`.
 pub fn log(msg: &str) {
     match human() {
@@ -297,6 +319,9 @@ pub fn finish(elapsed: Duration) -> u64 {
             let secs = elapsed.as_secs_f64();
             let rate = if secs > 0.0 && h.done > 0 { format!(" ({:.2} img/s)", h.done as f64 / secs) } else { String::new() };
             let mut msg = format!("Done: {} written in {}{rate}", h.done.saturating_sub(h.errors), fmt_duration(elapsed));
+            if h.animated > 0 {
+                msg += &format!(", {} of them animations copied unchanged", h.animated);
+            }
             if h.skipped > 0 {
                 msg += &format!(", {} skipped (already there)", h.skipped);
             }

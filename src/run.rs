@@ -6,6 +6,10 @@
 //! Nothing a single file does can stop the run: a file that fails is reported (`ERROR …`) and
 //! counted as done, an archive entry that can't be decoded is copied as-is, and every output is
 //! written under a temporary name and renamed into place only when complete.
+//!
+//! An animation (GIF, WebP, APNG, JPEG XL or AVIF with more than one frame) is copied as it is,
+//! under its own name and extension, instead of being upscaled: the decoders see only its first
+//! frame, and the encoders write stills.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::Write;
@@ -15,6 +19,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 
 use yosh_image::archive;
+use yosh_image::decode::{Animation, animation};
 use yosh_image::resize::Resizer;
 
 use crate::process::{self, Job, Work};
@@ -174,6 +179,24 @@ enum Done {
     BeginArchive { out: PathBuf, entries: usize },
     EndArchive,
     Failed { label: String, dest: Dest, err: String, original: Option<Vec<u8>> },
+    /// An animation, copied unchanged: `dest` already names the copy (see [`copy_dest`]).
+    Animated { label: String, dest: Dest, bytes: Vec<u8>, kind: Animation },
+}
+
+/// Where an animation's unchanged copy goes: an archive entry keeps its name; a file keeps the
+/// output's name (so `assign`'s unique names and the skip check still hold) with the source's
+/// extension. Writing over an existing copy loses nothing: it is the source's bytes again.
+fn copy_dest(dest: Dest, src: Option<&Path>) -> Dest {
+    match dest {
+        Dest::Entry { source, .. } => Dest::Entry { name: source.clone(), source },
+        Dest::File { path, folder } => {
+            let path = match src.and_then(|s| s.extension()) {
+                Some(ext) => path.with_extension(ext),
+                None => path,
+            };
+            Dest::File { path, folder }
+        }
+    }
 }
 
 fn catch<T>(f: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
@@ -332,13 +355,18 @@ fn count(inputs: &[Planned], out: &Output) -> u64 {
 fn prepare_stage(item: Item, job: &Job, resizer: &mut Resizer) -> Stage {
     match item {
         Item::Image { seq, label, src, dest } => {
-            let (bytes, keep) = match src {
+            let (bytes, keep, path) = match src {
                 Src::Path(p) => match std::fs::read(&p) {
-                    Ok(b) => (b, false),
+                    Ok(b) => (b, false, Some(p)),
                     Err(e) => return Stage::Done { seq, done: Done::Failed { label, dest, err: e.to_string(), original: None } },
                 },
-                Src::Bytes(b) => (b, true),
+                Src::Bytes(b) => (b, true, None),
             };
+            // (a header parser that panics on a broken file leaves it to the decoder to report)
+            if let Ok(Some(kind)) = catch(|| Ok(animation(&bytes))) {
+                let dest = copy_dest(dest, path.as_deref());
+                return Stage::Done { seq, done: Done::Animated { label, dest, bytes, kind } };
+            }
             match catch(|| process::prepare(&bytes, job, &label, resizer)) {
                 Ok(work) => Stage::Work { seq, label, dest, work, original: keep.then_some(bytes) },
                 Err(err) => Stage::Done { seq, done: Done::Failed { label, dest, err, original: keep.then_some(bytes) } },
@@ -529,6 +557,22 @@ impl Sink {
                     }
                 }
                 progress::archive_done();
+            }
+            Done::Animated { label, dest: Dest::File { path, folder }, bytes, kind } => {
+                match write_file(&path, &bytes) {
+                    Ok(()) => progress::animated_copied(&label, kind.name(), Some(&path)),
+                    Err(e) => progress::error(&path.display().to_string(), &e),
+                }
+                Self::file_done(folder);
+            }
+            Done::Animated { label, dest: Dest::Entry { name, .. }, bytes, kind } => {
+                if let Some(a) = &mut self.archive {
+                    match a.add(&name, &bytes, false) {
+                        Ok(()) => progress::animated_copied(&label, kind.name(), None),
+                        Err(e) => progress::error(&name, &e),
+                    }
+                }
+                progress::archive_entry_done();
             }
             Done::Failed { label, dest, err, original } => {
                 progress::error(&label, &err);
@@ -756,6 +800,58 @@ mod tests {
             .into_iter()
             .map(|p| p.dest.strip_prefix("out").unwrap().to_string_lossy().replace('\\', "/"))
             .collect()
+    }
+
+    /// A two-frame 1x1 GIF: the classic minimal GIF's image, twice.
+    const TWO_FRAME_GIF: &[u8] = b"GIF89a\x01\0\x01\0\x80\0\0\0\0\0\xff\xff\xff\
+        ,\0\0\0\0\x01\0\x01\0\0\x02\x02\x44\x01\0\
+        ,\0\0\0\0\x01\0\x01\0\0\x02\x02\x44\x01\0;";
+
+    fn job() -> Job {
+        use crate::settings::{Format, Target};
+        Job { chains: Vec::new(), threshold: 12, target: Target::Native, format: Format::Webp, quality: 80, lossless: false }
+    }
+
+    #[test]
+    fn animations_are_copied_unchanged() {
+        assert_eq!(animation(TWO_FRAME_GIF), Some(Animation::Gif));
+        let entry = Item::Image {
+            seq: 1,
+            label: "a.cbz :: p/01.gif".into(),
+            src: Src::Bytes(TWO_FRAME_GIF.to_vec()),
+            dest: Dest::Entry { name: "p/01.webp".into(), source: "p/01.gif".into() },
+        };
+        match prepare_stage(entry, &job(), &mut Resizer::new()) {
+            Stage::Done { done: Done::Animated { dest: Dest::Entry { name, .. }, bytes, kind, .. }, .. } => {
+                assert_eq!((name.as_str(), bytes.as_slice(), kind), ("p/01.gif", TWO_FRAME_GIF, Animation::Gif));
+            }
+            _ => panic!("an animated entry is copied under its own name"),
+        }
+
+        // a file: the output's name, the source's extension
+        let dir = std::env::temp_dir().join(format!("mangajanai-animated-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("anim.GIF");
+        std::fs::write(&src, TWO_FRAME_GIF).unwrap();
+        let file = Item::Image {
+            seq: 1,
+            label: src.display().to_string(),
+            src: Src::Path(src.clone()),
+            dest: Dest::File { path: dir.join("out/anim_x2.webp"), folder: true },
+        };
+        match prepare_stage(file, &job(), &mut Resizer::new()) {
+            Stage::Done { done: Done::Animated { dest: Dest::File { path, folder }, bytes, .. }, .. } => {
+                assert_eq!((path, folder, bytes.as_slice()), (dir.join("out/anim_x2.GIF"), true, TWO_FRAME_GIF));
+            }
+            _ => panic!("an animated file is copied"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // one frame is a still, and goes through the pipeline as before
+        let still = [&TWO_FRAME_GIF[..34], b";"].concat();
+        assert_eq!(animation(&still), None);
+        let item = Item::Image { seq: 1, label: "still".into(), src: Src::Bytes(still), dest: Dest::Entry { name: "s.webp".into(), source: "s.gif".into() } };
+        assert!(matches!(prepare_stage(item, &job(), &mut Resizer::new()), Stage::Work { .. }));
     }
 
     #[test]

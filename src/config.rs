@@ -541,11 +541,22 @@ mod tests {
         assert_eq!(f.save.quality, Some(90));
         assert_eq!(f.save.lossless, Some(false));
         assert_eq!(f.save.suffix, None, "empty = not set");
+        assert_eq!(f.save.workers, None, "empty = the default");
         assert_eq!(f.preset, None);
         assert_eq!(f.gpu.tile, Some(512));
         assert_eq!(f.gpu.devices.as_deref(), Some("first"));
         assert_eq!(f.resize.target().unwrap(), None);
         assert!(f.rule.is_empty(), "the example rule is commented out");
+    }
+
+    #[test]
+    fn workers_is_a_number() {
+        assert_eq!(File::parse("[output]
+workers = 24
+").unwrap().save.workers, Some(24));
+        assert!(File::parse("[output]
+workers = many
+").is_err());
     }
 
     #[test]

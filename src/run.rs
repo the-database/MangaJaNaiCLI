@@ -640,10 +640,10 @@ pub fn default_workers(threads: usize, inference_threads: usize) -> usize {
 
 /// Run the batch over `inputs`, in order. Each of `upscalers` (one per GPU) gets an inference
 /// thread that opens it lazily (so a run that needs no model never loads the runtime) and then takes
-/// prepared images as it frees up. `workers` sizes the CPU pools (default: [`default_workers`]).
-pub fn run(inputs: Vec<Input>, output: Output, job: Job, upscalers: Vec<OpenUpscaler>, pause: Arc<Pause>, workers: Option<usize>) {
+/// prepared images as it frees up. `worker_count` sizes the CPU pools (default: [`default_workers`]).
+pub fn run(inputs: Vec<Input>, output: Output, job: Job, upscalers: Vec<OpenUpscaler>, pause: Arc<Pause>, worker_count: Option<usize>) {
     let threads = thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
-    let n = workers.unwrap_or_else(|| default_workers(threads, upscalers.len().max(1))).max(1);
+    let n = worker_count.unwrap_or_else(|| default_workers(threads, upscalers.len().max(1))).max(1);
     let job = Arc::new(job);
     let format_ext = job.format.ext().to_string();
 

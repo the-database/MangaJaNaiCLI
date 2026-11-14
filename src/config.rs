@@ -11,6 +11,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::settings::{Chain, Format, Target};
+use crate::tiles::Tile;
 
 /// The file `mangajanai init` writes, and the reference for every setting.
 pub const TEMPLATE: &str = r#"; mangajanai settings
@@ -85,12 +86,17 @@ devices = first
 ; Inference threads per GPU. 2 needs twice the VRAM and rarely helps on TensorRT, which tiles on
 ; the GPU. DirectML tiles on the CPU, so 2 may still help there.
 streams = 1
-; Tile size in pixels (one engine is built per model and tile size), and the minimum overlap
-; between tiles (empty = libaji's default, 128: smaller can show seams in generated screentone).
-tile = 512
+; Tile size: auto, a size in pixels like 512, or a shape like 1216x704 (one engine is built per
+; model and tile). auto sizes tiles to the GPU's free memory: on TensorRT each page is split into
+; even tiles of up to 1024 from one engine per model; on TensorRT-RTX and DirectML it runs on 512
+; and, once a page size has come up often enough, builds an engine fitted to that size in the
+; background. Either is often 1.5 to 2 times as fast as 512 on a volume.
+; And the minimum overlap between tiles (empty = libaji's default, 128: smaller can show seams in
+; generated screentone).
+tile = auto
 overlap =
-; TensorRT: split each page into even tiles of at most `tile` from one engine for all tile
-; shapes (yes or no). Fewer pixels inferred and usually faster; slower on TensorRT-RTX.
+; With a fixed tile, TensorRT: split each page into even tiles of at most `tile` from one engine
+; for all tile shapes (yes or no; auto mode does this on TensorRT anyway). Slower on TensorRT-RTX.
 even_tiles = no
 ; Where built engines are kept (empty = next to each model).
 engine_folder =
@@ -155,7 +161,7 @@ pub struct Gpu {
     /// As the `--device` flag takes it: "first", "all" or "0,1".
     pub devices: Option<String>,
     pub streams: Option<u32>,
-    pub tile: Option<u32>,
+    pub tile: Option<Tile>,
     pub overlap: Option<u32>,
     pub even_tiles: Option<bool>,
     pub cache_dir: Option<String>,
@@ -174,7 +180,7 @@ pub struct Rule {
     pub min_scale: Option<i32>,
     pub max_scale: Option<i32>,
     pub auto_levels: Option<bool>,
-    pub tile: Option<u32>,
+    pub tile: Option<Tile>,
     pub pre_resize_width: Option<i32>,
     pub pre_resize_height: Option<i32>,
     pub pre_resize_percent: Option<f64>,
@@ -321,6 +327,11 @@ impl<'a> Reader<'a> {
         t.parse().map(Some).map_err(|_| format!("line {n}: {key} should be {what}, not '{v}'"))
     }
 
+    fn tile(&mut self, key: &str) -> Result<Option<Tile>, String> {
+        let Some((n, v)) = self.one(key)? else { return Ok(None) };
+        Tile::parse(&v).map(Some).map_err(|e| format!("line {n}: {key}: {e}"))
+    }
+
     fn finish(self, known: &[&str]) -> Result<(), String> {
         for (i, (n, k, _)) in self.sec.entries.iter().enumerate() {
             if !self.used[i] {
@@ -404,7 +415,7 @@ impl File {
                     }
                     f.gpu.devices = r.string("devices")?.map(|d| d.split([',', ' ', ';']).filter(|s| !s.is_empty()).collect::<Vec<_>>().join(","));
                     f.gpu.streams = r.number("streams", "a number like 1 or 2")?;
-                    f.gpu.tile = r.number("tile", "a number of pixels like 512")?;
+                    f.gpu.tile = r.tile("tile")?;
                     f.gpu.overlap = r.number("overlap", "a number of pixels like 128")?;
                     f.gpu.even_tiles = r.switch("even_tiles")?;
                     f.gpu.cache_dir = r.string("engine_folder")?;
@@ -424,7 +435,7 @@ impl File {
                         min_scale: r.number("min_scale", "a whole number like 2")?,
                         max_scale: r.number("max_scale", "a whole number like 2")?,
                         auto_levels: r.switch("auto_levels")?,
-                        tile: r.number("tile", "a number of pixels like 512")?,
+                        tile: r.tile("tile")?,
                         pre_resize_width: r.number("pre_resize_width", "a number of pixels")?,
                         pre_resize_height: r.number("pre_resize_height", "a number of pixels")?,
                         pre_resize_percent: r.number("pre_resize_percent", "a percentage like 50")?,
@@ -543,7 +554,7 @@ mod tests {
         assert_eq!(f.save.suffix, None, "empty = not set");
         assert_eq!(f.save.workers, None, "empty = the default");
         assert_eq!(f.preset, None);
-        assert_eq!(f.gpu.tile, Some(512));
+        assert_eq!(f.gpu.tile, Some(Tile::Auto));
         assert_eq!(f.gpu.devices.as_deref(), Some("first"));
         assert_eq!(f.resize.target().unwrap(), None);
         assert!(f.rule.is_empty(), "the example rule is commented out");

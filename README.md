@@ -23,8 +23,8 @@ The command is `mangajanai`. The same program is MangaJaNai GUI's upscaling back
   avif.
 - Transparency: uniform alpha is kept as is; varying alpha is recovered with the black/white two-pass
   trick, denoised and un-premultiplied.
-- Engines are built once per model, tile size and GPU, and cached. Several GPUs, or several streams on
-  one, share the work.
+- Engines are built once per model, tile size and GPU, and cached; tiles are sized to the GPU's free
+  memory. Several GPUs, or several streams on one, share the work.
 
 ## Install
 
@@ -115,20 +115,31 @@ mangajanai bench 2x_model.onnx --tile 512 --iters 20
 
 ### Speed
 
-- **`--even-tiles`** (`[gpu] even_tiles = yes`), TensorRT: fixed tiles are pushed flush against a
-  page's edges and often re-infer most of their area. With even tiles, each page is split into
-  tiles of at most `--tile` from one engine that takes any tile shape. With MangaJaNai ESRGAN 4x
-  on 24 pages (RTX 5090) the time in inference went from 19.3 s to 15.0 s at `--tile 512`, and
-  to 11.8 s at `--tile 1024`, which needs ~2.5x the VRAM. It's off by default: it's only been
-  measured on one GPU, and on TensorRT-RTX the shape-range engine runs ~30% slower per pixel.
+- **Tile size** (`--tile`, `[gpu] tile`) is one engine per model and tile. The default, `auto`,
+  sizes tiles to the GPU's free memory (counting what other programs use), from what each model
+  was measured to need:
+  - On TensorRT each model gets one engine that splits any page into the fewest even tiles of up
+    to 1024 (768 or 512 when memory is short). On an RTX 5090 with MangaJaNai ESRGAN 2x, a
+    1200x1800 page took 165 ms against 253 on 512, and ten pages of mixed sizes 36% less time;
+    with ESRGAN 4x, 780 ms against 1109. Larger tiles weren't faster.
+  - On TensorRT-RTX and DirectML, where that kind of engine is slow or missing, pages run on 512,
+    and a page size that keeps coming up (a volume, from its second or third page) gets an engine
+    fitted to it, built in the background. With MangaJaNai ESRGAN 2x on 1200x1800 pages (RTX
+    5090, TensorRT-RTX), the fitted 1216x992 tile ran a page in 122 ms against 242 on 512. A
+    fitted engine that isn't faster than 512 on its first pages is dropped, and pages of mixed
+    sizes stay on 512. A fitted engine built before (by this or yosh, recorded beside the engines
+    in `aji-fitted-engines.txt`) is used from the first page.
+
+  `--tile 512` or `--tile 1216x992` uses that one tile for everything instead, and with
+  `--even-tiles` (TensorRT) splits pages into even tiles of at most that. Tiles overlap by 128 px
+  and blend only at the centre of the overlap, which keeps generated screentone seamless; a
+  smaller `--overlap` is faster but can show seams.
 - **TensorRT-RTX** (`--backend tensorrt-rtx`, Windows, RTX 20 series and newer) builds engines in
-  seconds instead of minutes. Its speed relative to TensorRT depends on the model: on an RTX 5090
-  it was ~25% faster with MangaJaNai ESRGAN and about the same with FDAT_M. A model that fails on
+  seconds instead of minutes. Its speed relative to TensorRT depends on the model and the pages: on
+  an RTX 5090 it was 26-32% faster with MangaJaNai ESRGAN on a volume's pages and about the same
+  with FDAT_M and SPAN_S, while TensorRT was 6-30% faster on mixed page sizes. A model that fails on
   it falls back to TensorRT. Auto tries it first on the GPUs `setup` installs it for (RTX 20 /
   GTX 16 series and newer), then TensorRT, then DirectML, as MangaJaNai GUI and yosh do.
-- **Tile size** is one engine per size. 512 is a good default; larger tiles help light models.
-  Tiles overlap by 128 px and blend only at the centre of the overlap, which keeps generated
-  screentone seamless; a smaller `--overlap` is faster but can show seams.
 - **`--workers <n>`** (`[output] workers`) sets how many threads decode and encode images. The
   default, half the CPU's threads up to 8 and at least 4 per GPU, keeps one GPU busy with any
   format. Several GPUs can outrun the encoders: on 4x RTX 5090 (48 threads, 1050x1500 pages at

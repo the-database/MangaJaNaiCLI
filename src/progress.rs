@@ -185,13 +185,28 @@ pub fn archive_done() {
     }
 }
 
-/// A model's engine is being built (first use of this model and tile on this GPU). The line names
-/// the backend ("TensorRT" or "TensorRT-RTX"); the GUI tells them apart by it.
-pub fn engine_build(model: &str, tile: u32, backend: &str) {
+/// A model's engine is being built (first use of this model and tile on this GPU), and pages wait
+/// for it. The line names the backend ("TensorRT" or "TensorRT-RTX"); the GUI tells them apart by
+/// it.
+pub fn engine_build(model: &str, tile: &str, backend: &str) {
     let takes = if backend == "TensorRT" { "a few minutes" } else { "a few seconds" };
     match human() {
         Some(mut h) => h.say(&format!("Building the {backend} engine for {model} (tile {tile}) on this GPU; this takes {takes}, once")),
         None => line(&format!("ENGINE_BUILD {model} (tile {tile}): building the {backend} engine for this GPU; this takes {takes}, once")),
+    }
+}
+
+/// Auto mode is building an engine fitted to a page size (`tile` like `1216x992`) in the
+/// background, or has it ready. Pages don't wait for it, so the line protocol (the GUI's "building"
+/// status) doesn't mention it; the command line does.
+pub fn fitted_engine(model: &str, tile: &str, backend: &str, ready: bool) {
+    let takes = if backend == "TensorRT" { "a few minutes" } else { "a few seconds" };
+    if let Some(mut h) = human() {
+        h.say(&if ready {
+            format!("Engine fitted to tile {tile} ready: {model}")
+        } else {
+            format!("Building a {backend} engine for {model} fitted to this page size (tile {tile}) in the background; this takes {takes}, once")
+        });
     }
 }
 

@@ -15,6 +15,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 
@@ -691,6 +692,10 @@ pub fn run(inputs: Vec<Input>, output: Output, job: Job, upscalers: Vec<OpenUpsc
     let job = Arc::new(job);
     let format_ext = job.format.ext().to_string();
 
+    let planned = assign(inputs.iter().flat_map(|i| plan(i, &output, true)).collect(), &output, &format_ext, true);
+    // Pages still to come, for auto tiling's guess at how many more of a page size there will be.
+    let left = Arc::new(AtomicU64::new(count(&planned, &output)));
+
     let (item_tx, item_rx) = sync_channel::<Item>(n * 2);
     let (prep_tx, prep_rx) = sync_channel::<Stage>(n);
     let (infer_tx, infer_rx) = sync_channel::<Stage>(n);
@@ -701,8 +706,9 @@ pub fn run(inputs: Vec<Input>, output: Output, job: Job, upscalers: Vec<OpenUpsc
 
     let prep_rx = Arc::new(Mutex::new(prep_rx));
     pause.set_threads(upscalers.len());
+    let gpus = upscalers.len().max(1);
     for open in upscalers {
-        let (prep_rx, infer_tx, pause) = (prep_rx.clone(), infer_tx.clone(), pause.clone());
+        let (prep_rx, infer_tx, pause, left) = (prep_rx.clone(), infer_tx.clone(), pause.clone(), left.clone());
         handles.push(thread::spawn(move || {
             let mut up: Option<Upscaler> = None;
             let mut up_err: Option<String> = None;
@@ -731,6 +737,13 @@ pub fn run(inputs: Vec<Input>, output: Output, job: Job, upscalers: Vec<OpenUpsc
                         }
                     }
                 }
+                if let Stage::Work { .. } = &stage {
+                    let before = left.try_update(Ordering::Relaxed, Ordering::Relaxed, |v| Some(v.saturating_sub(1))).unwrap_or(0);
+                    if let Some(u) = up.as_mut() {
+                        // this GPU's share, this page included
+                        u.set_pages_left(before.div_ceil(gpus as u64));
+                    }
+                }
                 if infer_tx.send(infer_stage(stage, &mut up, &up_err)).is_err() {
                     break;
                 }
@@ -742,7 +755,6 @@ pub fn run(inputs: Vec<Input>, output: Output, job: Job, upscalers: Vec<OpenUpsc
     let j = job.clone();
     handles.extend(workers(n, infer_rx, done_tx, move |stage, r| finish_stage(stage, &j, r)));
 
-    let planned = assign(inputs.iter().flat_map(|i| plan(i, &output, true)).collect(), &output, &format_ext, true);
     let walker = thread::spawn(move || walk(&planned, &output, &format_ext, item_tx));
 
     // Write results in input order.

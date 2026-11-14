@@ -124,19 +124,6 @@ pub fn final_size(target: Target, base: (u32, u32), (w, h): (u32, u32)) -> Optio
     (!unchanged).then_some(dims)
 }
 
-/// The tile (input pixels) for a chain's "Model Tile Size": libaji builds one TensorRT engine per
-/// tile size, so this maps 1.x's options onto a few fixed sizes. Sizes are multiples of 16, which
-/// every shipped model accepts.
-pub fn tile_size(setting: &str) -> u32 {
-    match setting.trim() {
-        "Maximum" | "No Tiling" => 1024,
-        s => match s.parse::<u32>() {
-            Ok(n) => (n / 16 * 16).clamp(64, 4096),
-            Err(_) => 512, // "Auto (Estimate)" and anything unrecognized
-        },
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -256,12 +243,13 @@ mod tests {
 
     #[test]
     fn tile_sizes() {
-        assert_eq!(tile_size("Auto (Estimate)"), 512);
-        assert_eq!(tile_size("Maximum"), 1024);
-        assert_eq!(tile_size("No Tiling"), 1024);
-        assert_eq!(tile_size("384"), 384);
-        assert_eq!(tile_size("200"), 192, "snapped to a multiple of 16");
-        assert_eq!(tile_size("16"), 64);
-        assert_eq!(tile_size("garbage"), 512);
+        use crate::tiles::Tile;
+        assert_eq!(Tile::from_setting("Auto (Estimate)"), Tile::Auto);
+        assert_eq!(Tile::from_setting("Maximum"), Tile::Fixed(1024, 1024));
+        assert_eq!(Tile::from_setting("No Tiling"), Tile::Fixed(1024, 1024));
+        assert_eq!(Tile::from_setting("384"), Tile::Fixed(384, 384));
+        assert_eq!(Tile::from_setting("200"), Tile::Fixed(192, 192), "snapped to a multiple of 16");
+        assert_eq!(Tile::from_setting("16"), Tile::Fixed(64, 64));
+        assert_eq!(Tile::from_setting("garbage"), Tile::Auto);
     }
 }

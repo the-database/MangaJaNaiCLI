@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 
 use crate::config::{self, File};
 use crate::settings::{self, Chain, Format, Target, Workflow};
+use crate::tiles::{FALLBACK, Tile};
 use crate::upscaler::{self, BackendChoice, Upscaler};
 use crate::{process, progress, run};
 
@@ -71,11 +72,14 @@ GPU:
   --device <d>              first (default) | all | 0,1 (numbers from `{prog} devices`)
   --streams <n>             inference threads per GPU (default 1). 2 doubles VRAM; it rarely
                             helps on TensorRT, which tiles on the GPU, but may on DirectML
-  --tile <px>               tile size (default 512; one engine per model and tile)
+  --tile <t>                auto (default): sized to the GPU's free memory; on TensorRT even
+                            tiles of up to 1024 from one engine per model, elsewhere tile 512
+                            plus an engine fitted to each page size that comes up often enough
+                            | 512 | 1216x704 (one engine per model and tile)
   --overlap <px>            minimum tile overlap (default: libaji's, 128)
-  --even-tiles              TensorRT: split each page into even tiles of at most --tile from
-                            one engine for all tile shapes: fewer pixels inferred, often
-                            faster (slower per pixel on TensorRT-RTX)
+  --even-tiles              with a fixed --tile, TensorRT: split each page into even tiles of
+                            at most --tile from one engine for all tile shapes (auto does on
+                            TensorRT; slower per pixel on TensorRT-RTX)
   --cache-dir <dir>         TensorRT engine cache (default: next to each model; cache/ next to
                             the program in a pack store install)
   --aji-dir <dir>           where aji.dll / libaji.so is (default: next to the program, else an
@@ -167,7 +171,7 @@ struct Flags {
     device: Option<String>,
     streams: Option<u32>,
     workers: Option<usize>,
-    tile: Option<u32>,
+    tile: Option<Tile>,
     overlap: Option<u32>,
     even_tiles: Option<bool>,
     cache_dir: Option<PathBuf>,
@@ -261,7 +265,7 @@ fn parse_flags(args: Vec<String>) -> Result<Flags, String> {
             "--device" | "--devices" => f.device = Some(value(&key)?),
             "--streams" => f.streams = Some(num::<u32>(&key, &value(&key)?)?.clamp(1, 8)),
             "--workers" => f.workers = Some(num::<usize>(&key, &value(&key)?)?.clamp(1, 256)),
-            "--tile" => f.tile = Some(num(&key, &value(&key)?)?),
+            "--tile" => f.tile = Some(Tile::parse(&value(&key)?).map_err(|e| format!("{key}: {e}"))?),
             "--overlap" => f.overlap = Some(num(&key, &value(&key)?)?),
             "--even-tiles" => f.even_tiles = Some(true),
             "--fixed-tiles" => f.even_tiles = Some(false),
@@ -948,15 +952,19 @@ fn bench(flags: Flags) -> Result<i32, String> {
     check_store(&aji_dir)?;
     let backend = flags.backend.unwrap_or(BackendChoice::Auto);
     let id = device_ids(&aji_dir, backend, flags.device.as_deref())?[0];
-    let tile = flags.tile.unwrap_or(512);
-    let (w, h) = flags.size.unwrap_or((tile * 2, tile * 3));
+    let tile = flags.tile.unwrap_or(Tile::Auto);
+    let (w, h) = flags.size.unwrap_or(match tile {
+        Tile::Fixed(tw, th) => (tw * 2, th * 3),
+        Tile::Auto => (FALLBACK * 2, FALLBACK * 3),
+    });
     let channels: u8 = if flags.gray { 1 } else { 3 };
     let iters = flags.iters.unwrap_or(10).max(1);
 
     progress::set_human(true, None);
     let mut up = Upscaler::open(&aji_dir, backend, id, default_cache_dir(flags.cache_dir.clone()), models_dirs(&flags, None, &aji_dir), flags.overlap, flags.even_tiles.unwrap_or(false))?;
     let path = up.resolve(&model).ok_or_else(|| format!("model not found: {model}"))?;
-    progress::info(&format!("{} on {}: {w}x{h} {}, tile {tile}", path.file_name().unwrap_or_default().to_string_lossy(), up.description, if flags.gray { "gray" } else { "RGB" }));
+    let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
+    let what = format!("{name} on {}: {w}x{h} {}", up.description, if flags.gray { "gray" } else { "RGB" });
 
     // deterministic texture: smooth gradients plus noise, so the model does real work
     let mut seed = 0x2545_f491u32;
@@ -973,6 +981,24 @@ fn bench(flags: Flags) -> Result<i32, String> {
     let t0 = Instant::now();
     let (_, scale) = up.upscale(&path, tile, w, h, channels, &pixels)?;
     let first = t0.elapsed();
+    // auto: time the engine a run of these pages settles on, not the square it may start on
+    let label = match tile {
+        Tile::Auto => {
+            up.set_pages_left(1000);
+            let settle = Instant::now();
+            loop {
+                if let Some(t) = up.settled(&path, w, h) {
+                    break format!("{t} (auto)");
+                }
+                if settle.elapsed() > Duration::from_secs(600) {
+                    break "auto, not settled".into();
+                }
+                up.upscale(&path, tile, w, h, channels, &pixels)?;
+            }
+        }
+        t => t.to_string(),
+    };
+    progress::info(&format!("{what}, tile {label}"));
     let mut times = Vec::with_capacity(iters as usize);
     for _ in 0..iters {
         let t = Instant::now();

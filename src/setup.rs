@@ -48,10 +48,10 @@ const RUNTIME_INDEX_SHA256_LINUX: &str = "d441210f7747b255f17483f7c8b921817ad3f9
 /// TensorRT-RTX: aji_trtrtx.dll + the TensorRT for RTX runtime, from the libaji release this
 /// program's archive bundles.
 const AJI_REPO: &str = "the-database/animejanai-inference";
-const AJI_VERSION: &str = "v0.31.1";
+const AJI_VERSION: &str = "v0.32.0";
 const TRTRTX_ASSET: &str = "aji-trtrtx-windows-x64.zip";
-const TRTRTX_SHA256: &str = "874e321370467fec64fd6b7a801911b4feb5e22ec2ebc6bb6bdfc5f93feec486";
-const TRTRTX_BYTES: u64 = 106_527_692;
+const TRTRTX_SHA256: &str = "f73587e3c633584ecd11748ad3a14dade1e0ef2d37491b89d8f560dec0948c01";
+const TRTRTX_BYTES: u64 = 111_329_286;
 
 /// The default models, the same archives (and SHA-256s) MangaJaNai GUI installs.
 const MODELS_REPO: &str = "the-database/MangaJaNai";

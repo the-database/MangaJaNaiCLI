@@ -33,7 +33,7 @@ default = ["jxl"]
 [dependencies]
 # yosh's imaging core (decoders, archives, resizing, the libaji bindings), pinned to a commit of
 # the-database/yosh. Bump `rev` to take its changes; its decode/resize output is kept bit-identical.
-yosh-image = { git = "https://github.com/the-database/yosh", rev = "869cf2557be8609a99dc08db93ec1c15b3f392d4", features = ["aji"] }
+yosh-image = { git = "https://github.com/the-database/yosh", rev = "1c4e80e5f15548c49da5426da0556a02fda10c03", features = ["aji"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 zip = "9"

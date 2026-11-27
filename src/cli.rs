@@ -75,7 +75,7 @@ GPU:
   --streams <n>             inference threads per GPU (default 1). 2 doubles VRAM; it rarely
                             helps on TensorRT, which tiles on the GPU, but may on DirectML
   --tile <t>                auto (default): sized to the GPU's free memory; on TensorRT even
-                            tiles of up to 1024 from one engine per model, elsewhere tile 512
+                            tiles of up to 1024 (2048 for large pages on native kernels), elsewhere 512
                             plus an engine fitted to each page size that comes up often enough
                             | 512 | 1216x704 (one engine per model and tile)
   --overlap <px>            minimum tile overlap (default: libaji's, 128)

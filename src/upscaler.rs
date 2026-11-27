@@ -5,9 +5,8 @@
 //! Auto mode (`--tile auto`, the default) sizes tiles to the GPU's free memory (yosh-image's
 //! `tiles::MemoryUse`, from what libaji reports about the models it loaded) and
 //!
-//! - on TensorRT runs every page on one even-tiles engine per model: tiles of at most 1024 (less
-//!   where memory is short), each page split into the fewest even tiles
-//!   ([`Upscaler::even_tile_for`]);
+//! - on TensorRT splits each page into even tiles of up to 1024, or up to 2048 on native
+//!   kernels when a large page benefits and the model fits ([`Upscaler::even_tile_for`]);
 //! - on TensorRT-RTX and DirectML, where even tiles are slow or missing, runs pages on the 512
 //!   square and builds engines fitted to page sizes that come up often enough ([`Fit`]).
 //!
@@ -19,8 +18,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use yosh_image::aji::{Aji, Backend, Context, ContextParams, Device, LoadParams, Model, ModelState, Pixels, PixelsMut, Upscaled};
-use yosh_image::tiles::Budget;
+use yosh_image::aji::{Aji, Backend, Context, ContextParams, Device, LoadParams, Memory, Model, ModelState, Pixels, PixelsMut, Upscaled};
+use yosh_image::tiles::{Budget, EVEN_TILES, big_tiles_for, even_tile, fits_memory, scratch};
 
 use crate::tiles::{self, FALLBACK, MemoryUse, Shape, Tile};
 use crate::{nvml, precision, progress};
@@ -97,6 +96,83 @@ fn unreserve(device: u64, bytes: u64) {
     if let Some(i) = r.iter().position(|&x| x == (device, bytes)) {
         r.remove(i);
     }
+}
+
+/// The active even-tile limit. Reconsider it when a page enters a different size range.
+#[derive(Clone, Copy)]
+struct EvenTile {
+    size: u32,
+    /// Upper end of the last page-size range. None once this run is on a fixed fallback.
+    checked: Option<u32>,
+    /// A larger tile for this model is worthwhile only if it holds the whole page.
+    whole_page: bool,
+}
+
+/// Striped models can shift screentone phase at a new join. A partial 4x transformer
+/// promotion also costs several GiB for little end-to-end benefit.
+fn needs_whole_page(scale: u32, striped: bool) -> bool {
+    striped || scale >= 4
+}
+
+/// Screen a candidate using the model/GPU memory record (or the ordinary first 512 probe).
+/// Full-output models grow with tile area. Strip buffers grow more slowly, so use only
+/// their known minimum until libaji measures that precise tile.
+fn native_tile_estimate(page: Shape, t: u32, use_: MemoryUse) -> Option<u64> {
+    let full_io = 6 * (1 + u64::from(use_.scale).pow(2));
+    let striped = use_.buffers_per_px != full_io as f64;
+    if needs_whole_page(use_.scale, striped) && page.0.max(page.1) > t {
+        return None;
+    }
+    let model = if striped { use_.weights + 6 * u64::from(t).pow(2) } else { use_.added((t, t), page, 0, 0) };
+    Some(model + scratch(page, t, use_.scale))
+}
+
+/// libaji 0.33 allocates a model during a probe. First rule out impossible promotions
+/// from data auto mode already has, then reserve the exact result including page scratch.
+fn big_native_tile(page: Shape, candidates: &[u32], budget: &Budget, mut probe: impl FnMut(Shape) -> Option<Memory>) -> Option<(u32, u64, bool)> {
+    let &largest = candidates.first()?;
+    // Even a stale engine record carries its measured output scale. No 4x layout may
+    // promote this page if the largest candidate still leaves a join.
+    if budget.use_.scale >= 4 && page.0.max(page.1) > largest {
+        return None;
+    }
+    let use_ = if budget.use_.shared {
+        // A record from a TensorRT engine run cannot predict a native model's allocations.
+        let tile = (FALLBACK, FALLBACK);
+        MemoryUse::probed(&probe(tile)?, tile)?
+    } else {
+        budget.use_
+    };
+    let fits = |bytes, m: &Memory| {
+        bytes <= m.device_total / 4 && fits_memory(bytes, m.device_free.saturating_sub(budget.reserved), m.device_total)
+    };
+    if !candidates.iter().any(|&t| {
+        native_tile_estimate(page, t, use_).is_some_and(|bytes| budget.mem.is_none_or(|m| fits(bytes, &m)))
+    }) {
+        return None;
+    }
+    // A striped output buffer can understate scale in a record made by an older probe.
+    // Only pay for a short, full-height reference if a candidate survived the cheap checks.
+    let rows = std::env::var("AJI_IMG_TAIL_ROWS").ok().and_then(|s| s.parse::<i32>().ok())
+        .filter(|&n| n > 0).map_or(32, |n| n.min(32) as u32);
+    let reference = (256, rows);
+    let small = probe(reference)?;
+    let scale = MemoryUse::probed(&small, reference)?.scale;
+    let full_io = 6 * (1 + u64::from(scale).pow(2));
+    if small.model_buffers != u64::from(reference.0) * u64::from(rows) * full_io {
+        return None;
+    }
+    candidates.iter().copied().find_map(|t| {
+        if !fits(native_tile_estimate(page, t, MemoryUse { scale, ..use_ })?, &small) {
+            return None;
+        }
+        let mem = probe((t, t))?;
+        let bytes = mem.model_weights + mem.model_activations + mem.model_buffers + scratch(page, t, scale);
+        // The earlier geometry check avoids an allocation. Check the actual layout too:
+        // the cached record can describe another tile or an earlier native setting.
+        let whole_page = needs_whole_page(scale, mem.model_buffers < full_io * u64::from(t).pow(2));
+        (fits(bytes, &mem) && (!whole_page || page.0.max(page.1) <= t)).then_some((t, bytes, whole_page))
+    })
 }
 
 /// A loaded model's key: file, tile (with even tiles, the largest), even tiles.
@@ -254,9 +330,8 @@ pub struct Upscaler {
     /// Auto mode's fitted shape (and the share of the square's work it saves) by model file and
     /// page size, decided on the first page of that size whose model's memory use is known.
     shapes: HashMap<(PathBuf, Shape), Option<(Shape, f64)>>,
-    /// Auto mode on TensorRT: each model's even-tiles size, decided on its first page; 0 once its
-    /// engine has failed (the square instead).
-    even: HashMap<PathBuf, u32>,
+    /// Auto mode on TensorRT: one even-tiles model per file. A size of 0 selects the fallback.
+    even: HashMap<PathBuf, EvenTile>,
     /// What [`Upscaler::even_tile_for`] reserved for an even-tiles engine not loaded yet.
     even_reserved: HashMap<PathBuf, u64>,
     /// Each model's memory use, measured from its engines (see yosh-image's `tiles::Budget`).
@@ -515,23 +590,48 @@ impl Upscaler {
         }
     }
 
-    /// Auto mode on TensorRT: the even-tiles size for `path`, decided on its first page (`page`)
-    /// as the largest of yosh-image's `tiles::EVEN_TILES` that fits the GPU's free memory, by its
-    /// recorded memory use or else a generous guess. The engine is cached per size, so a size
-    /// once built is kept while it fits. 0 once its engine has failed.
+    /// On TensorRT, keep the ordinary even-tile engine or promote a native model when a later
+    /// page can use a larger tile. A promotion must fit while the current model is still loaded.
     fn even_tile_for(&mut self, path: &Path, page: Shape) -> u32 {
-        if let Some(&t) = self.even.get(path) {
-            return t;
+        let candidates = big_tiles_for(page);
+        let side = page.0.max(page.1);
+        let largest = candidates.first().copied().unwrap_or(EVEN_TILES[0]);
+        let range = if side <= largest { largest } else { u32::MAX };
+        let previous = self.even.get(path).copied();
+        if let Some(prev) = previous && (prev.checked.is_none() || prev.checked == Some(range) || side <= prev.size) {
+            return prev.size;
         }
+
         let _deciding = LOAD_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         self.probe_native(path);
         let budget = self.budget(path);
-        let t = tiles::tiles::even_tile(|t| budget.fits((t, t), page).0);
-        let bytes = budget.fits((t, t), page).1;
-        reserve(self.device.id, bytes);
-        self.even_reserved.insert(path.to_path_buf(), bytes);
-        self.even.insert(path.to_path_buf(), t);
-        t
+        let usable = previous.filter(|prev| !prev.whole_page || side <= prev.size);
+        let current = usable.map_or_else(|| even_tile(|t| budget.fits((t, t), page).0), |prev| prev.size);
+        // The live probe decides native eligibility. A disk record can come from a previous
+        // run with native kernels disabled. Avoid re-probing known refusals or a tight GPU.
+        let try_big = current >= EVEN_TILES[0] && !self.not_native.contains(path) && native_off().is_none();
+        let bigger = if try_big {
+            let larger = candidates.partition_point(|&t| t > current);
+            big_native_tile(page, &candidates[..larger], &budget, |tile| {
+                self.ctx.native_probe(&LoadParams { tile: Some(tile), overlap: self.overlap, even_tiles: true, ..LoadParams::new(path) })
+            })
+        } else {
+            None
+        };
+        let (size, bytes, whole_page) = bigger.unwrap_or_else(|| {
+            (current, budget.fits((current, current), page).1, usable.is_some_and(|p| p.whole_page))
+        });
+        if previous.is_none_or(|prev| prev.size != size) {
+            if let Some(prev) = previous {
+                self.models.remove(&(path.to_path_buf(), (prev.size, prev.size), true));
+            }
+            if !self.models.contains_key(&(path.to_path_buf(), (size, size), true)) {
+                reserve(self.device.id, bytes);
+                self.even_reserved.insert(path.to_path_buf(), bytes);
+            }
+        }
+        self.even.insert(path.to_path_buf(), EvenTile { size, checked: try_big.then_some(range), whole_page });
+        size
     }
 
     /// The engine for a `w`x`h` page: a fixed tile as is; in auto mode on TensorRT the model's
@@ -745,7 +845,7 @@ impl Upscaler {
             self.fitted.insert((path.to_path_buf(), pick.shape), Fit::Failed);
         } else if pick.even {
             self.models.remove(&(path.to_path_buf(), pick.shape, true));
-            self.even.insert(path.to_path_buf(), 0);
+            self.even.insert(path.to_path_buf(), EvenTile { size: 0, checked: None, whole_page: false });
         }
     }
 
@@ -755,7 +855,7 @@ impl Upscaler {
     pub fn settled(&self, path: &Path, w: u32, h: u32) -> Option<String> {
         if self.backend == Backend::TensorRt {
             return Some(match self.even.get(path) {
-                Some(&t) if t > 0 => format!("{t} (even)"),
+                Some(t) if t.size > 0 => format!("{} (even)", t.size),
                 _ => FALLBACK.to_string(),
             });
         }
@@ -1093,6 +1193,85 @@ fn hint_device(aji_dir: &Path, choice: BackendChoice, device_id: u64) -> Option<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn big_tiles_charge_full_page_scratch_for_a_striped_model() {
+        let page = (1131, 1600);
+        let candidates = big_tiles_for(page);
+        let gib = 1_u64 << 30;
+        let probe = |(w, h): Shape| Some(Memory {
+            device_total: 32 * gib,
+            device_free: 32 * gib,
+            model_weights: 100 << 20,
+            model_activations: if w == 2048 { 5 * gib } else { 3 * gib },
+            model_buffers: 6 * u64::from(w) * u64::from(h + h.min(256) * 4 * 4),
+            ..Memory::default()
+        });
+        let use_ = MemoryUse::probed(&probe((512, 512)).unwrap(), (512, 512)).unwrap();
+        let mut budget = Budget { mem: None, reserved: 0, area_budget: 0, use_ };
+        let bytes = |t| {
+            let m = probe((t, t)).unwrap();
+            m.model_weights + m.model_activations + m.model_buffers + scratch(page, t, 4)
+        };
+        assert_eq!(big_native_tile(page, &candidates, &budget, probe), Some((2048, bytes(2048), true)));
+        budget.reserved = 25 * gib;
+        // 1536 would fit memory, but it would introduce a new seam in this 1600-high page.
+        assert_eq!(big_native_tile(page, &candidates, &budget, probe), None);
+        let shorter = (1131, 1500);
+        assert_eq!(big_native_tile(shorter, &big_tiles_for(shorter), &budget, probe).unwrap().0, 1536);
+        budget.reserved = 30 * gib;
+        assert_eq!(big_native_tile(page, &candidates, &budget, probe), None);
+        assert_eq!(big_native_tile((1024, 1024), &[], &budget, |_| panic!("small page probed")), None);
+    }
+
+    #[test]
+    fn impossible_promotions_skip_every_extra_probe() {
+        let device = Memory { device_total: 32 << 30, device_free: 32 << 30, ..Memory::default() };
+        let mut budget = Budget {
+            mem: Some(device), reserved: 0, area_budget: 0,
+            use_: MemoryUse { weights: 32 << 20, activations_per_px: 364.0, buffers_per_px: 12.0, shared: false, scale: 2 },
+        };
+        let tall = (1131, 2160);
+        assert_eq!(big_native_tile(tall, &big_tiles_for(tall), &budget, |_| panic!("oversize striped page probed")), None);
+
+        // The recorded full-output 4x model cannot afford 2048, and 1536 still splits this page.
+        budget.use_ = MemoryUse { weights: 10 << 20, activations_per_px: 2300.0, buffers_per_px: 102.0, shared: false, scale: 4 };
+        let page = (1131, 1600);
+        assert_eq!(big_native_tile(page, &big_tiles_for(page), &budget, |_| panic!("no affordable whole tile")), None);
+
+        // The same 1536 tile pays when it removes the last join.
+        let landscape = (1200, 1000);
+        let pick = big_native_tile(landscape, &big_tiles_for(landscape), &budget, |(w, h)| {
+            let area = u64::from(w) * u64::from(h);
+            Some(Memory { model_weights: 10 << 20, model_activations: 2300 * area, model_buffers: 102 * area, ..device })
+        });
+        assert!(matches!(pick, Some((1536, _, true))));
+    }
+
+    #[test]
+    fn exact_native_footprint_is_limited_to_one_quarter() {
+        let page = (1131, 1600);
+        let t = 2048;
+        let total = 32_u64 << 30;
+        let cap = 8_u64 << 30;
+        let device = Memory { device_total: total, device_free: total, ..Memory::default() };
+        let budget = Budget {
+            mem: Some(device), reserved: 0, area_budget: 0,
+            use_: MemoryUse { weights: 32 << 20, activations_per_px: 300.0, buffers_per_px: 30.0, shared: false, scale: 2 },
+        };
+        let pick = |required: u64| big_native_tile(page, &[t], &budget, |(w, h)| {
+            let model_buffers = 30 * u64::from(w) * u64::from(h);
+            let model_weights = budget.use_.weights;
+            let model_activations = if w == t {
+                required - model_weights - model_buffers - scratch(page, t, 2)
+            } else {
+                1 << 20
+            };
+            Some(Memory { model_weights, model_buffers, model_activations, ..device })
+        });
+        assert_eq!(pick(cap), Some((t, cap, false)));
+        assert_eq!(pick(cap + 1), None);
+    }
 
     #[test]
     fn native_messages_are_parsed() {

@@ -92,8 +92,8 @@ devices = first
 streams = 1
 ; Tile size: auto, a size in pixels like 512, or a shape like 1216x704 (one engine is built per
 ; model and tile). auto sizes tiles to the GPU's free memory: on TensorRT each page is split into
-; even tiles of up to 1024 from one engine per model; on TensorRT-RTX and DirectML it runs on 512
-; and, once a page size has come up often enough, builds an engine fitted to that size in the
+; even tiles of up to 1024 (up to 2048 on native kernels for large pages). On TensorRT-RTX and
+; DirectML it runs on 512 and, for a recurring page size, builds a fitted engine in the
 ; background. Either is often 1.5 to 2 times as fast as 512 on a volume.
 ; And the minimum overlap between tiles (empty = libaji's default, 128: smaller can show seams in
 ; generated screentone).
